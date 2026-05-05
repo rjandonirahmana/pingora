@@ -1,41 +1,63 @@
+# =========================
 # Stage 1: Builder
-FROM rustlang/rust:nightly-alpine AS builder
+# =========================
+FROM rust:nightly AS builder
 
-RUN apk add --no-cache \
-    musl-dev g++ make perl pkgconfig \
-    openssl-dev openssl-libs-static \
-    zlib-dev zlib-static \
-    protobuf protobuf-dev \
-    curl
-
-RUN rustup target add x86_64-unknown-linux-musl
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    zlib1g-dev \
+    protobuf-compiler \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-ENV OPENSSL_STATIC=1
-ENV PKG_CONFIG_ALLOW_CROSS=1
-
-# 1. Cache deps (tanpa build.rs)
+# -------------------------
+# 1. Cache dependencies
+# -------------------------
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main(){}" > src/main.rs && \
-    cargo build --release --target x86_64-unknown-linux-musl && \
-    rm -rf src/ \
-           target/x86_64-unknown-linux-musl/release/build/pingora-* \
-           target/x86_64-unknown-linux-musl/release/deps/e_ticketing-* \
-           target/x86_64-unknown-linux-musl/release/e_ticketing*
 
-# 2. Copy full source (build.rs + proto + src)
+# Dummy src to cache deps
+RUN mkdir src && echo "fn main(){}" > src/main.rs && \
+    cargo build --release && \
+    rm -rf src
+
+# -------------------------
+# 2. Copy full source
+# -------------------------
 COPY . .
 
-# 3. Final build — build.rs jalan, protoc generate auth.rs
-RUN cargo build --release --target x86_64-unknown-linux-musl
+# -------------------------
+# 3. Build real binary
+# -------------------------
+RUN cargo build --release
 
-# Stage 2: Runtime
-FROM scratch
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/pingora /pingora
+# =========================
+# Stage 2: Runtime (minimal)
+# =========================
+# =========================
+# Stage 2: Runtime (minimal)
+# =========================
+FROM debian:bookworm-slim
 
-EXPOSE 8080
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libcap2-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/pingora /usr/local/bin/pingora
+
+# allow bind to 443 without root
+RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/pingora
+
 ENV BIND_HOST=0.0.0.0
 ENV BIND_PORT=443
-CMD ["/pingora"]
+
+EXPOSE 443
+
+CMD ["pingora"]
