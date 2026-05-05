@@ -1,4 +1,4 @@
-name: Node Docker CI/CD
+name: Docker CI/CD
 
 on:
   push:
@@ -27,5 +27,5 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/pingora:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/pingora:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/kinetic-proxy:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/kinetic-proxy:${{ github.sha }}
