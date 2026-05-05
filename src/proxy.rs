@@ -1,12 +1,14 @@
 //! Implementasi KineticProxy — inti reverse proxy dua-domain.
 //!
-//! Routing (sesuai nginx config):
+//! Routing:
 //!
-//!  ulala.space    /*        → Frontend :3100 (SPA fallback otomatis)
-//!  ulalaapi.store /api/ws/* → Backend  :8080 (WebSocket, timeout 3600s)
-//!  ulalaapi.store /api/*    → Backend  :8080 (REST)
-//!  ulalaapi.store /image/*  → Image    :3902 (Garage S3, strip "/image" prefix)
-//!  ulalaapi.store /*        → Backend  :8080 (fallback)
+//!  ulala.space              /*        → Frontend :3100 (SPA fallback otomatis)
+//!  ulalaapi.store           /api/ws/* → Backend  :8080 (WebSocket, timeout 3600s)
+//!  ulalaapi.store           /api/*    → Backend  :8080 (REST)
+//!  ulalaapi.store           /image/*  → RustFS3  :9000 (strip "/image" prefix)
+//!  image.ulalaapi.store     /*        → RustFS3  :9000 (subdomain, NO strip)
+//!  ui.ulalaapi.store        /*        → RustFSUI :9001
+//!  ulalaapi.store           /*        → Backend  :8080 (fallback)
 //!
 //! TLS:
 //!  Port 443 — SNI callback memilih cert ulala.space vs ulalaapi.store secara
@@ -28,12 +30,9 @@ use pingora_proxy::{http_proxy_service, ProxyHttp, Session};
 use crate::config::Config;
 use crate::upstream::Upstream;
 
-// ─── Timeout constants (sesuai nginx) ────────────────────────────────────────
+// ─── Timeout constants ────────────────────────────────────────────────────────
 
-/// Timeout koneksi + baca/tulis untuk koneksi WebSocket (nginx: 3600s)
 const WS_TIMEOUT_SECS: u64 = 3600;
-
-/// Timeout untuk request REST biasa
 const REST_CONN_TIMEOUT_SECS: u64 = 30;
 const REST_READ_TIMEOUT_SECS: u64 = 60;
 const REST_WRITE_TIMEOUT_SECS: u64 = 30;
@@ -41,12 +40,13 @@ const REST_WRITE_TIMEOUT_SECS: u64 = 30;
 // ─── Per-request context ─────────────────────────────────────────────────────
 
 pub struct RequestCtx {
-    /// Upstream yang dipilih untuk request ini
     pub upstream: Upstream,
-    /// Request ID untuk logging korelasi
     pub request_id: String,
-    /// Apakah path /image/* — butuh strip prefix sebelum dikirim ke Garage
+    /// true HANYA untuk path-based routing: ulalaapi.store/image/* → RustFS3
+    /// false untuk subdomain: image.ulalaapi.store/* (path sudah benar, tidak perlu strip)
     pub strip_image_prefix: bool,
+    /// Original Host header dari client (preserve untuk RustFS virtual-host & CSRF)
+    pub original_host: String,
 }
 
 // ─── Main proxy ──────────────────────────────────────────────────────────────
@@ -64,6 +64,7 @@ impl ProxyHttp for KineticProxy {
             upstream: Upstream::Frontend,
             request_id: String::new(),
             strip_image_prefix: false,
+            original_host: String::new(),
         }
     }
 
@@ -81,13 +82,20 @@ impl ProxyHttp for KineticProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
+        ctx.original_host = host.to_string();
         ctx.upstream = Upstream::for_request(host, &path, &self.cfg);
         ctx.request_id = new_request_id();
-        ctx.strip_image_prefix = ctx.upstream == Upstream::Image;
+
+        // FIX: strip_image_prefix HANYA untuk path-based routing di api_domain.
+        // Subdomain image.ulalaapi.store punya path langsung (/bucket/file.jpg),
+        // strip "/image" di sana akan merusak semua request (path jadi "/").
+        let host_bare = host.split(':').next().unwrap_or(host);
+        ctx.strip_image_prefix = ctx.upstream == Upstream::RustFS3
+            && host_bare != self.cfg.image_subdomain.as_str()
+            && path.starts_with("/image/");
 
         let addr = ctx.upstream.addr(&self.cfg).to_string();
 
-        // Deteksi WebSocket: via Upgrade header ATAU path /api/ws/*
         let upgrade_is_ws = req
             .headers
             .get("upgrade")
@@ -97,19 +105,19 @@ impl ProxyHttp for KineticProxy {
         let is_ws = upgrade_is_ws || Upstream::is_ws_path(&path);
 
         tracing::debug!(
-            "[{}] {} {} host={} upstream={:?} ws={}",
+            "[{}] {} {} host={} upstream={:?} ws={} strip={}",
             ctx.request_id,
             req.method,
             path,
             host,
             ctx.upstream,
-            is_ws
+            is_ws,
+            ctx.strip_image_prefix,
         );
 
         let mut peer = HttpPeer::new(&addr, false, String::new());
 
         if is_ws {
-            // WebSocket — timeout panjang sesuai nginx proxy_read_timeout 3600s
             peer.options.connection_timeout = Some(Duration::from_secs(WS_TIMEOUT_SECS));
             peer.options.read_timeout = Some(Duration::from_secs(WS_TIMEOUT_SECS));
             peer.options.write_timeout = Some(Duration::from_secs(WS_TIMEOUT_SECS));
@@ -129,11 +137,10 @@ impl ProxyHttp for KineticProxy {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // ── Strip prefix /image → / untuk Garage S3 ──────────────────────────
-        // Nginx: location /image/ { proxy_pass http://127.0.0.1:3902/; }
-        // Efeknya: /image/foo.jpg → /foo.jpg
+        // ── Strip prefix /image → / (hanya untuk path-based api_domain routing) ─
         if ctx.strip_image_prefix {
             let path = upstream_request.uri.path();
+            // /image/foo.jpg → /foo.jpg  |  /image → /
             let stripped = path.strip_prefix("/image").unwrap_or("/");
             let stripped = if stripped.is_empty() { "/" } else { stripped };
 
@@ -155,8 +162,22 @@ impl ProxyHttp for KineticProxy {
         }
 
         // ── Host header ───────────────────────────────────────────────────────
-        let host = ctx.upstream.addr(&self.cfg).to_string();
-        upstream_request.insert_header("host", &host)?;
+        // FIX: Untuk RustFS S3 dan UI Console, preserve original Host dari client:
+        //   - S3: virtual-host style bucket routing butuh host yang benar
+        //   - Console: MinIO/RustFS cek Host header untuk CSRF protection
+        // Untuk upstream lain: set ke upstream addr (standar reverse proxy)
+        let host_value = match ctx.upstream {
+            Upstream::RustFS3 | Upstream::RustFSUI => {
+                // Strip port, karena upstream lokal tidak butuh port eksternal
+                ctx.original_host
+                    .split(':')
+                    .next()
+                    .unwrap_or(&ctx.original_host)
+                    .to_string()
+            }
+            _ => ctx.upstream.addr(&self.cfg).to_string(),
+        };
+        upstream_request.insert_header("host", &host_value)?;
 
         // ── Forwarding headers ────────────────────────────────────────────────
         upstream_request.insert_header("x-request-id", &ctx.request_id)?;
@@ -179,7 +200,7 @@ impl ProxyHttp for KineticProxy {
     ) -> Result<()> {
         let path = session.req_header().uri.path().to_string();
 
-        // ── CORS hanya untuk api_domain /api/* ────────────────────────────────
+        // ── CORS untuk api_domain /api/* ──────────────────────────────────────
         if ctx.upstream == Upstream::Backend && path.starts_with("/api") {
             let origin = session
                 .req_header()
@@ -216,17 +237,49 @@ impl ProxyHttp for KineticProxy {
             upstream_response.insert_header("access-control-max-age", "86400")?;
         }
 
-        // ── Cache headers untuk /image/* ──────────────────────────────────────
-        // Sesuai nginx: expires 30d; Cache-Control "public, max-age=2592000"
-        if ctx.upstream == Upstream::Image && self.cfg.image_cache_days > 0 {
+        // ── CORS untuk RustFS S3 (browser fetch/upload dari ulala.space) ──────
+        if ctx.upstream == Upstream::RustFS3 {
+            let origin = session
+                .req_header()
+                .headers
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+
+            if !origin.is_empty() {
+                let allowed_origin = if self
+                    .cfg
+                    .cors_origins
+                    .iter()
+                    .any(|o| o == "*" || o == origin)
+                {
+                    origin.to_string()
+                } else {
+                    self.cfg
+                        .cors_origins
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "*".into())
+                };
+                upstream_response.insert_header("access-control-allow-origin", &allowed_origin)?;
+                upstream_response.insert_header("access-control-allow-credentials", "true")?;
+                upstream_response
+                    .insert_header("access-control-allow-methods", "GET, HEAD, PUT, OPTIONS")?;
+                upstream_response.insert_header(
+                    "access-control-allow-headers",
+                    "authorization, range, content-type",
+                )?;
+            }
+        }
+
+        // ── Cache headers untuk RustFS S3 ─────────────────────────────────────
+        if ctx.upstream == Upstream::RustFS3 && self.cfg.image_cache_days > 0 {
             let max_age = self.cfg.image_cache_days as u64 * 86_400;
             upstream_response
                 .insert_header("cache-control", &format!("public, max-age={}", max_age))?;
-            // proxy_buffering off → biarkan chunk langsung turun ke client
-            // (Pingora default streaming, tidak perlu flag khusus)
         }
 
-        // ── Cache untuk static assets frontend (/static/, .wasm, .js) ─────────
+        // ── Cache untuk static assets frontend ────────────────────────────────
         if ctx.upstream == Upstream::Frontend
             && (path.starts_with("/static/") || path.ends_with(".wasm") || path.ends_with(".js"))
         {
@@ -234,20 +287,19 @@ impl ProxyHttp for KineticProxy {
                 .insert_header("cache-control", "public, max-age=31536000, immutable")?;
         }
 
-        // ── Security headers (semua response) ────────────────────────────────
+        // ── Security headers ──────────────────────────────────────────────────
         upstream_response.insert_header("x-content-type-options", "nosniff")?;
         upstream_response.insert_header("x-frame-options", "SAMEORIGIN")?;
         upstream_response.insert_header("x-xss-protection", "1; mode=block")?;
         upstream_response.insert_header("referrer-policy", "strict-origin-when-cross-origin")?;
 
-        // ── Correlation ID ────────────────────────────────────────────────────
         upstream_response.insert_header("x-request-id", &ctx.request_id)?;
         upstream_response.insert_header("x-served-by", "kinetic-proxy")?;
 
         Ok(())
     }
 
-    // ── 4. Preflight OPTIONS — jawab langsung tanpa ke upstream ───────────────
+    // ── 4. Preflight OPTIONS ───────────────────────────────────────────────────
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
         let method = session.req_header().method.clone();
         let path = session.req_header().uri.path().to_string();
@@ -276,7 +328,7 @@ impl ProxyHttp for KineticProxy {
             resp.insert_header("content-length", "0")?;
 
             session.write_response_header(Box::new(resp), true).await?;
-            return Ok(true); // stop pipeline
+            return Ok(true);
         }
 
         Ok(false)
@@ -291,7 +343,6 @@ impl ProxyHttp for KineticProxy {
         mut e: Box<pingora_core::Error>,
     ) -> Box<pingora_core::Error> {
         tracing::error!("Gagal konek ke upstream: {e}");
-
         e.set_retry(false);
         e
     }
@@ -312,14 +363,12 @@ impl ProxyHttp for KineticProxy {
         );
 
         match e.etype {
-            // Gabungkan semua jenis error koneksi yang ingin di-retry
             ErrorType::ConnectTimedout
             | ErrorType::ConnectError
             | ErrorType::ConnectRefused
             | ErrorType::ConnectProxyFailure => {
                 e.set_retry(true);
             }
-            // Jika tidak ada di daftar atas, jangan retry
             _ => {
                 e.set_retry(false);
             }
@@ -331,8 +380,6 @@ impl ProxyHttp for KineticProxy {
 
 // ─── HTTP → HTTPS Redirect proxy ─────────────────────────────────────────────
 
-/// Proxy sederhana di port 80 yang me-redirect semua request ke HTTPS.
-/// Sesuai nginx: return 301 https://$host$request_uri;
 pub struct RedirectProxy;
 
 #[async_trait]
@@ -372,14 +419,12 @@ impl ProxyHttp for RedirectProxy {
         _session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        // Tidak pernah dipanggil — request_filter selalu return true
         unreachable!("RedirectProxy tidak punya upstream")
     }
 }
 
-// ─── Factory: bangun kedua service ───────────────────────────────────────────
+// ─── Factory ──────────────────────────────────────────────────────────────────
 
-/// Bangun service proxy utama (HTTPS :443) dengan SNI dual-cert.
 pub fn build_proxy_service(
     cfg: &Config,
     server: &mut Server,
@@ -393,16 +438,16 @@ pub fn build_proxy_service(
         let cert_web = cfg.tls_cert_web.as_deref().unwrap();
         let key_web = cfg.tls_key_web.as_deref().unwrap();
 
-        // Buat TlsSettings dengan cert utama (ulala.space)
         let mut tls = pingora_core::listeners::tls::TlsSettings::intermediate(cert_web, key_web)
             .expect("Gagal load TLS cert web");
 
-        // SNI callback — switch ke cert ulalaapi.store jika SNI cocok
+        // SNI callback: pilih cert api untuk api_domain dan semua subdomain-nya.
+        // PENTING: tls_cert_api harus wildcard cert (*.ulalaapi.store) agar
+        // mencakup image.ulalaapi.store, ui.ulalaapi.store, dll.
         if let (Some(cert_api), Some(key_api)) = (cfg.tls_cert_api.clone(), cfg.tls_key_api.clone())
         {
             use openssl::ssl::{NameType, SslAcceptor, SslFiletype, SslMethod};
 
-            // Build secondary SSL context untuk api_domain
             let mut api_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
                 .expect("API SslAcceptor builder gagal");
             api_builder
@@ -413,12 +458,16 @@ pub fn build_proxy_service(
                 .expect("Gagal load key API");
             let api_ctx = api_builder.build().into_context();
 
-            // Pasang SNI callback: kalau ClientHello sertakan api_domain,
-            // swap SSL context ke api_ctx supaya cert ulalaapi.store yang dipakai.
             let api_domain_owned = cfg.api_domain.clone();
+
             tls.set_servername_callback(move |ssl, _alert| {
                 if let Some(sni) = ssl.servername(NameType::HOST_NAME) {
-                    if sni == api_domain_owned || sni == format!("www.{}", api_domain_owned) {
+                    // Match api_domain dan semua subdomain-nya
+                    let matches = sni == api_domain_owned
+                        || sni == format!("www.{}", api_domain_owned)
+                        || sni.ends_with(&format!(".{}", api_domain_owned));
+
+                    if matches {
                         ssl.set_ssl_context(&api_ctx)
                             .map_err(|_| openssl::ssl::SniError::NOACK)?;
                     }
@@ -439,7 +488,6 @@ pub fn build_proxy_service(
     svc
 }
 
-/// Bangun service redirect HTTP → HTTPS (:80).
 pub fn build_redirect_service(
     cfg: &Config,
     server: &mut Server,
@@ -457,8 +505,10 @@ fn new_request_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_micros();
-    let rnd: u32 = (ts ^ ts.wrapping_mul(0x9e37_79b9)) & 0xffff;
-    format!("{:08x}{:04x}", ts, rnd)
+        .unwrap_or_default();
+    let secs = ts.as_secs() & 0xffff_ffff;
+    let nanos = ts.subsec_nanos();
+    // Kombinasikan secs + nanos + noise untuk menghindari collision
+    let noise: u32 = (nanos ^ nanos.wrapping_mul(0x9e37_79b9)) & 0xffff;
+    format!("{:08x}{:08x}{:04x}", secs, nanos, noise)
 }

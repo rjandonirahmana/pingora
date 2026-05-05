@@ -71,6 +71,18 @@ pub struct Config {
     /// Max koneksi ke upstream
     #[serde(default = "default_pool")]
     pub upstream_pool_size: usize,
+
+    #[serde(default = "default_rustfs_ui")]
+    pub rustfs_ui_address: String,
+
+    #[serde(default = "default_rustfs_s3")]
+    pub rustfs_s3_address: String,
+
+    #[serde(default = "default_ui_subdomain")]
+    pub ui_subdomain: String,
+
+    #[serde(default = "default_image_subdomain")]
+    pub image_subdomain: String,
 }
 
 impl Config {
@@ -141,6 +153,10 @@ impl Default for Config {
             image_cache_days: default_image_cache_days(),
             rate_limit_rps: default_rate_limit(),
             upstream_pool_size: default_pool(),
+            rustfs_s3_address: default_rustfs_s3(),
+            rustfs_ui_address: default_rustfs_ui(),
+            ui_subdomain: default_ui_subdomain(),
+            image_subdomain: default_image_subdomain(),
         }
     }
 }
@@ -177,4 +193,18 @@ fn default_rate_limit() -> u64 {
 }
 fn default_pool() -> usize {
     64
+}
+
+fn default_rustfs_ui() -> String {
+    "127.0.0.1:9001".into()
+}
+fn default_rustfs_s3() -> String {
+    "127.0.0.1:9000".into()
+}
+
+fn default_ui_subdomain() -> String {
+    "ui.ulalaapi.store".into()
+}
+fn default_image_subdomain() -> String {
+    "image.ulalaapi.store".into()
 }
