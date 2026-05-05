@@ -1,5 +1,5 @@
 [package]
-name = "kinetic-proxy"
+name = "pingora"
 version = "0.1.0"
 edition = "2021"
 
@@ -21,5 +21,5 @@ openssl = "0.10.79"
 http = "1.4.0"
 
 [[bin]]
-name = "kinetic-proxy"
+name = "pingora"
 path = "src/main.rs"
