@@ -1,4 +1,4 @@
-# kinetic-proxy — konfigurasi produksi ulala.space + ulalaapi.store
+# pingora — konfigurasi produksi ulala.space + ulalaapi.store
 #
 # Override dengan ENV:
 #   PROXY_LISTEN, PROXY_BACKEND, PROXY_FRONTEND, PROXY_IMAGE,
@@ -8,22 +8,22 @@
 
 # ── Listener ──────────────────────────────────────────────────────────────────
 listen_addr: "0.0.0.0:443"
-http_redirect_addr: "0.0.0.0:80"   # redirect HTTP → HTTPS
+http_redirect_addr: "0.0.0.0:80" # redirect HTTP → HTTPS
 
 # ── Domain ────────────────────────────────────────────────────────────────────
-web_domain: "ulala.space"          # SPA Leptos
-api_domain: "ulalaapi.store"       # REST + WS + Image
+web_domain: "ulala.space" # SPA Leptos
+api_domain: "ulalaapi.store" # REST + WS + Image
 
 # ── Upstream services ─────────────────────────────────────────────────────────
-backend_addr:  "127.0.0.1:8080"   # Axum REST + WebSocket
-frontend_addr: "127.0.0.1:3100"   # static-web-server (Leptos SPA)
-image_addr:    "127.0.0.1:3902"   # Garage S3 web UI
+backend_addr: "127.0.0.1:8080" # Axum REST + WebSocket
+frontend_addr: "127.0.0.1:3100" # static-web-server (Leptos SPA)
+image_addr: "127.0.0.1:3902" # Garage S3 web UI
 
 # ── TLS (Let's Encrypt) ───────────────────────────────────────────────────────
 tls_cert_web: "/etc/letsencrypt/live/ulala.space/fullchain.pem"
-tls_key_web:  "/etc/letsencrypt/live/ulala.space/privkey.pem"
+tls_key_web: "/etc/letsencrypt/live/ulala.space/privkey.pem"
 tls_cert_api: "/etc/letsencrypt/live/ulalaapi.store/fullchain.pem"
-tls_key_api:  "/etc/letsencrypt/live/ulalaapi.store/privkey.pem"
+tls_key_api: "/etc/letsencrypt/live/ulalaapi.store/privkey.pem"
 
 # ── CORS (hanya berlaku untuk ulalaapi.store /api/*) ──────────────────────────
 cors_origins:
@@ -31,7 +31,7 @@ cors_origins:
   - "https://www.ulala.space"
 
 # ── Image cache ───────────────────────────────────────────────────────────────
-image_cache_days: 30               # sesuai nginx: expires 30d
+image_cache_days: 30 # sesuai nginx: expires 30d
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 rate_limit_rps: 200

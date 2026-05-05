@@ -16,16 +16,18 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Cache deps
-COPY Cargo.toml Cargo.lock ./
+# Cache deps - handle missing Cargo.lock
+COPY Cargo.toml ./
+# Cargo.lock optional, create if not exists
+RUN if [ ! -f Cargo.lock ]; then cargo generate-lockfile; fi
 RUN mkdir src && echo "fn main(){}" > src/main.rs && \
     cargo build --release && \
     rm -rf src
 
-# Copy source
+# Copy source code
 COPY . .
 
-# Build
+# Build dengan binary name "pingora"
 RUN cargo build --release
 
 # =========================
@@ -40,19 +42,21 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Binary
+# Copy binary (nama binary dari Cargo.toml)
 COPY --from=builder /app/target/release/pingora /usr/local/bin/pingora
 
-# Config
+# Copy config
 COPY config.yaml /app/config.yaml
 
-# Allow port 443
+# Allow binding to privileged ports (80, 443)
 RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/pingora
 
-ENV BIND_HOST=0.0.0.0
-ENV BIND_PORT=443
+# Environment variables
+ENV RUST_LOG=info
 ENV CONFIG_PATH=/app/config.yaml
 
-EXPOSE 443
+# Expose ports
+EXPOSE 80 443
 
-CMD ["pingora"]
+# Run dengan config path
+CMD ["/usr/local/bin/pingora", "--config", "/app/config.yaml"]
