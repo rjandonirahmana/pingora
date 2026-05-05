@@ -86,7 +86,7 @@ impl ProxyHttp for KineticProxy {
         ctx.upstream = Upstream::for_request(host, &path, &self.cfg);
         ctx.request_id = new_request_id();
 
-        // FIX: strip_image_prefix HANYA untuk path-based routing di api_domain.
+        // strip_image_prefix HANYA untuk path-based routing di api_domain.
         // Subdomain image.ulalaapi.store punya path langsung (/bucket/file.jpg),
         // strip "/image" di sana akan merusak semua request (path jadi "/").
         let host_bare = host.split(':').next().unwrap_or(host);
@@ -162,19 +162,17 @@ impl ProxyHttp for KineticProxy {
         }
 
         // ── Host header ───────────────────────────────────────────────────────
-        // FIX: Untuk RustFS S3 dan UI Console, preserve original Host dari client:
+        // Untuk RustFS S3 dan UI Console, preserve original Host dari client:
         //   - S3: virtual-host style bucket routing butuh host yang benar
         //   - Console: MinIO/RustFS cek Host header untuk CSRF protection
         // Untuk upstream lain: set ke upstream addr (standar reverse proxy)
         let host_value = match ctx.upstream {
-            Upstream::RustFS3 | Upstream::RustFSUI => {
-                // Strip port, karena upstream lokal tidak butuh port eksternal
-                ctx.original_host
-                    .split(':')
-                    .next()
-                    .unwrap_or(&ctx.original_host)
-                    .to_string()
-            }
+            Upstream::RustFS3 | Upstream::RustFSUI => ctx
+                .original_host
+                .split(':')
+                .next()
+                .unwrap_or(&ctx.original_host)
+                .to_string(),
             _ => ctx.upstream.addr(&self.cfg).to_string(),
         };
         upstream_request.insert_header("host", &host_value)?;
@@ -279,6 +277,38 @@ impl ProxyHttp for KineticProxy {
                 .insert_header("cache-control", &format!("public, max-age={}", max_age))?;
         }
 
+        // ── FIX: Content-Type untuk RustFS S3 ────────────────────────────────
+        // RustFS kadang kirim application/octet-stream → browser download.
+        // Override berdasarkan ekstensi path supaya browser render langsung.
+        if ctx.upstream == Upstream::RustFS3 {
+            let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+
+            let mime = match ext.as_str() {
+                "png" => Some("image/png"),
+                "jpg" | "jpeg" => Some("image/jpeg"),
+                "gif" => Some("image/gif"),
+                "webp" => Some("image/webp"),
+                "svg" => Some("image/svg+xml"),
+                "avif" => Some("image/avif"),
+                "ico" => Some("image/x-icon"),
+                "mp4" => Some("video/mp4"),
+                "webm" => Some("video/webm"),
+                "mov" => Some("video/quicktime"),
+                "mp3" => Some("audio/mpeg"),
+                "ogg" => Some("audio/ogg"),
+                "pdf" => Some("application/pdf"),
+                "json" => Some("application/json"),
+                "txt" => Some("text/plain; charset=utf-8"),
+                _ => None,
+            };
+
+            if let Some(ct) = mime {
+                upstream_response.insert_header("content-type", ct)?;
+                // Hapus content-disposition supaya browser render langsung, bukan download
+                upstream_response.remove_header("content-disposition");
+            }
+        }
+
         // ── Cache untuk static assets frontend ────────────────────────────────
         if ctx.upstream == Upstream::Frontend
             && (path.starts_with("/static/") || path.ends_with(".wasm") || path.ends_with(".js"))
@@ -287,7 +317,7 @@ impl ProxyHttp for KineticProxy {
                 .insert_header("cache-control", "public, max-age=31536000, immutable")?;
         }
 
-        // ── Security headers ──────────────────────────────────────────────────
+        // ── Security headers (semua response) ────────────────────────────────
         upstream_response.insert_header("x-content-type-options", "nosniff")?;
         upstream_response.insert_header("x-frame-options", "SAMEORIGIN")?;
         upstream_response.insert_header("x-xss-protection", "1; mode=block")?;
@@ -508,7 +538,6 @@ fn new_request_id() -> String {
         .unwrap_or_default();
     let secs = ts.as_secs() & 0xffff_ffff;
     let nanos = ts.subsec_nanos();
-    // Kombinasikan secs + nanos + noise untuk menghindari collision
     let noise: u32 = (nanos ^ nanos.wrapping_mul(0x9e37_79b9)) & 0xffff;
     format!("{:08x}{:08x}{:04x}", secs, nanos, noise)
 }
