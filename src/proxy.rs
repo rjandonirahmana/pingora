@@ -9,12 +9,6 @@
 //!  image.ulalaapi.store     /*        → RustFS3  :9000 (subdomain, NO strip)
 //!  ui.ulalaapi.store        /*        → RustFSUI :9001
 //!  ulalaapi.store           /*        → Backend  :8080 (fallback)
-//!
-//! TLS:
-//!  Port 443 — SNI callback memilih cert ulala.space vs ulalaapi.store secara
-//!  otomatis berdasarkan SNI handshake.
-//!
-//! HTTP → HTTPS redirect di-handle oleh RedirectProxy (lihat main.rs).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,26 +24,61 @@ use pingora_proxy::{http_proxy_service, ProxyHttp, Session};
 use crate::config::Config;
 use crate::upstream::Upstream;
 
-// ─── Timeout constants ────────────────────────────────────────────────────────
-
 const WS_TIMEOUT_SECS: u64 = 3600;
 const REST_CONN_TIMEOUT_SECS: u64 = 30;
 const REST_READ_TIMEOUT_SECS: u64 = 60;
 const REST_WRITE_TIMEOUT_SECS: u64 = 30;
 
-// ─── Per-request context ─────────────────────────────────────────────────────
+fn mime_from_path(path: &str) -> Option<&'static str> {
+    let ext = path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        "avif" => Some("image/avif"),
+        "ico" => Some("image/x-icon"),
+        "bmp" => Some("image/bmp"),
+        "mp4" => Some("video/mp4"),
+        "webm" => Some("video/webm"),
+        "mov" => Some("video/quicktime"),
+        "mp3" => Some("audio/mpeg"),
+        "ogg" => Some("audio/ogg"),
+        "wav" => Some("audio/wav"),
+        "pdf" => Some("application/pdf"),
+        "txt" => Some("text/plain; charset=utf-8"),
+        "json" => Some("application/json"),
+        "xml" => Some("application/xml"),
+        _ => None,
+    }
+}
+
+fn new_request_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = ts.as_secs() & 0xffff_ffff;
+    let nanos = ts.subsec_nanos();
+    let noise: u32 = (nanos ^ nanos.wrapping_mul(0x9e37_79b9)) & 0xffff;
+    format!("{:08x}{:08x}{:04x}", secs, nanos, noise)
+}
 
 pub struct RequestCtx {
     pub upstream: Upstream,
     pub request_id: String,
-    /// true HANYA untuk path-based routing: ulalaapi.store/image/* → RustFS3
-    /// false untuk subdomain: image.ulalaapi.store/* (path sudah benar, tidak perlu strip)
     pub strip_image_prefix: bool,
-    /// Original Host header dari client (preserve untuk RustFS virtual-host & CSRF)
     pub original_host: String,
 }
-
-// ─── Main proxy ──────────────────────────────────────────────────────────────
 
 pub struct KineticProxy {
     cfg: Arc<Config>,
@@ -68,7 +97,6 @@ impl ProxyHttp for KineticProxy {
         }
     }
 
-    // ── 1. Pilih upstream ─────────────────────────────────────────────────────
     async fn upstream_peer(
         &self,
         session: &mut Session,
@@ -86,9 +114,6 @@ impl ProxyHttp for KineticProxy {
         ctx.upstream = Upstream::for_request(host, &path, &self.cfg);
         ctx.request_id = new_request_id();
 
-        // strip_image_prefix HANYA untuk path-based routing di api_domain.
-        // Subdomain image.ulalaapi.store punya path langsung (/bucket/file.jpg),
-        // strip "/image" di sana akan merusak semua request (path jadi "/").
         let host_bare = host.split(':').next().unwrap_or(host);
         ctx.strip_image_prefix = ctx.upstream == Upstream::RustFS3
             && host_bare != self.cfg.image_subdomain.as_str()
@@ -130,17 +155,14 @@ impl ProxyHttp for KineticProxy {
         Ok(Box::new(peer))
     }
 
-    // ── 2. Modifikasi request sebelum dikirim ke upstream ─────────────────────
     async fn upstream_request_filter(
         &self,
         session: &mut Session,
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // ── Strip prefix /image → / (hanya untuk path-based api_domain routing) ─
         if ctx.strip_image_prefix {
             let path = upstream_request.uri.path();
-            // /image/foo.jpg → /foo.jpg  |  /image → /
             let stripped = path.strip_prefix("/image").unwrap_or("/");
             let stripped = if stripped.is_empty() { "/" } else { stripped };
 
@@ -161,11 +183,6 @@ impl ProxyHttp for KineticProxy {
             upstream_request.set_uri(new_uri);
         }
 
-        // ── Host header ───────────────────────────────────────────────────────
-        // Untuk RustFS S3 dan UI Console, preserve original Host dari client:
-        //   - S3: virtual-host style bucket routing butuh host yang benar
-        //   - Console: MinIO/RustFS cek Host header untuk CSRF protection
-        // Untuk upstream lain: set ke upstream addr (standar reverse proxy)
         let host_value = match ctx.upstream {
             Upstream::RustFS3 | Upstream::RustFSUI => ctx
                 .original_host
@@ -177,7 +194,6 @@ impl ProxyHttp for KineticProxy {
         };
         upstream_request.insert_header("host", &host_value)?;
 
-        // ── Forwarding headers ────────────────────────────────────────────────
         upstream_request.insert_header("x-request-id", &ctx.request_id)?;
         upstream_request.insert_header("x-forwarded-proto", "https")?;
 
@@ -189,7 +205,6 @@ impl ProxyHttp for KineticProxy {
         Ok(())
     }
 
-    // ── 3. Modifikasi response sebelum dikembalikan ke client ─────────────────
     async fn response_filter(
         &self,
         session: &mut Session,
@@ -198,7 +213,7 @@ impl ProxyHttp for KineticProxy {
     ) -> Result<()> {
         let path = session.req_header().uri.path().to_string();
 
-        // ── CORS untuk api_domain /api/* ──────────────────────────────────────
+        // ── CORS untuk Backend /api/* ─────────────────────────────────────────
         if ctx.upstream == Upstream::Backend && path.starts_with("/api") {
             let origin = session
                 .req_header()
@@ -235,8 +250,18 @@ impl ProxyHttp for KineticProxy {
             upstream_response.insert_header("access-control-max-age", "86400")?;
         }
 
-        // ── CORS untuk RustFS S3 (browser fetch/upload dari ulala.space) ──────
+        // ── RustFS S3: CORS + Content-Type + Content-Disposition ──────────────
+        //
+        // ROOT CAUSE masalah download:
+        //   RustFS mengirim Content-Disposition: attachment → browser selalu download
+        //   meskipun Content-Type sudah benar.
+        //
+        // FIX: insert_header() di Pingora REPLACE header dari upstream (tidak append).
+        //   - Override Content-Type berdasarkan ekstensi file
+        //   - SELALU set Content-Disposition: inline (unconditional)
+        //     supaya browser render langsung, bukan download
         if ctx.upstream == Upstream::RustFS3 {
+            // CORS untuk browser upload/fetch
             let origin = session
                 .req_header()
                 .headers
@@ -268,48 +293,25 @@ impl ProxyHttp for KineticProxy {
                     "authorization, range, content-type",
                 )?;
             }
-        }
 
-        // ── Cache headers untuk RustFS S3 ─────────────────────────────────────
-        if ctx.upstream == Upstream::RustFS3 && self.cfg.image_cache_days > 0 {
-            let max_age = self.cfg.image_cache_days as u64 * 86_400;
-            upstream_response
-                .insert_header("cache-control", &format!("public, max-age={}", max_age))?;
-        }
-
-        // ── FIX: Content-Type untuk RustFS S3 ────────────────────────────────
-        // RustFS kadang kirim application/octet-stream → browser download.
-        // Override berdasarkan ekstensi path supaya browser render langsung.
-        if ctx.upstream == Upstream::RustFS3 {
-            let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
-
-            let mime = match ext.as_str() {
-                "png" => Some("image/png"),
-                "jpg" | "jpeg" => Some("image/jpeg"),
-                "gif" => Some("image/gif"),
-                "webp" => Some("image/webp"),
-                "svg" => Some("image/svg+xml"),
-                "avif" => Some("image/avif"),
-                "ico" => Some("image/x-icon"),
-                "mp4" => Some("video/mp4"),
-                "webm" => Some("video/webm"),
-                "mov" => Some("video/quicktime"),
-                "mp3" => Some("audio/mpeg"),
-                "ogg" => Some("audio/ogg"),
-                "pdf" => Some("application/pdf"),
-                "json" => Some("application/json"),
-                "txt" => Some("text/plain; charset=utf-8"),
-                _ => None,
-            };
-
-            if let Some(ct) = mime {
-                upstream_response.insert_header("content-type", ct)?;
-                // Hapus content-disposition supaya browser render langsung, bukan download
-                upstream_response.remove_header("content-disposition");
+            // Cache
+            if self.cfg.image_cache_days > 0 {
+                let max_age = self.cfg.image_cache_days as u64 * 86_400;
+                upstream_response
+                    .insert_header("cache-control", &format!("public, max-age={}", max_age))?;
             }
+
+            // Override Content-Type berdasarkan ekstensi
+            if let Some(mime) = mime_from_path(&path) {
+                upstream_response.insert_header("content-type", mime)?;
+            }
+
+            // KUNCI: selalu inline — ini yang bikin browser render bukan download.
+            // Bahkan kalau Content-Type sudah benar, "attachment" tetap paksa download.
+            upstream_response.insert_header("content-disposition", "inline")?;
         }
 
-        // ── Cache untuk static assets frontend ────────────────────────────────
+        // ── Cache static assets frontend ──────────────────────────────────────
         if ctx.upstream == Upstream::Frontend
             && (path.starts_with("/static/") || path.ends_with(".wasm") || path.ends_with(".js"))
         {
@@ -317,19 +319,17 @@ impl ProxyHttp for KineticProxy {
                 .insert_header("cache-control", "public, max-age=31536000, immutable")?;
         }
 
-        // ── Security headers (semua response) ────────────────────────────────
+        // ── Security headers ──────────────────────────────────────────────────
         upstream_response.insert_header("x-content-type-options", "nosniff")?;
         upstream_response.insert_header("x-frame-options", "SAMEORIGIN")?;
         upstream_response.insert_header("x-xss-protection", "1; mode=block")?;
         upstream_response.insert_header("referrer-policy", "strict-origin-when-cross-origin")?;
-
         upstream_response.insert_header("x-request-id", &ctx.request_id)?;
         upstream_response.insert_header("x-served-by", "kinetic-proxy")?;
 
         Ok(())
     }
 
-    // ── 4. Preflight OPTIONS ───────────────────────────────────────────────────
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
         let method = session.req_header().method.clone();
         let path = session.req_header().uri.path().to_string();
@@ -364,7 +364,6 @@ impl ProxyHttp for KineticProxy {
         Ok(false)
     }
 
-    // ── 5. Error handling ─────────────────────────────────────────────────────
     fn fail_to_connect(
         &self,
         _session: &mut Session,
@@ -391,7 +390,6 @@ impl ProxyHttp for KineticProxy {
             e,
             session.req_header().uri
         );
-
         match e.etype {
             ErrorType::ConnectTimedout
             | ErrorType::ConnectError
@@ -403,19 +401,17 @@ impl ProxyHttp for KineticProxy {
                 e.set_retry(false);
             }
         }
-
         e
     }
 }
 
-// ─── HTTP → HTTPS Redirect proxy ─────────────────────────────────────────────
+// ─── HTTP → HTTPS Redirect ────────────────────────────────────────────────────
 
 pub struct RedirectProxy;
 
 #[async_trait]
 impl ProxyHttp for RedirectProxy {
     type CTX = ();
-
     fn new_ctx(&self) -> Self::CTX {
         ()
     }
@@ -471,9 +467,6 @@ pub fn build_proxy_service(
         let mut tls = pingora_core::listeners::tls::TlsSettings::intermediate(cert_web, key_web)
             .expect("Gagal load TLS cert web");
 
-        // SNI callback: pilih cert api untuk api_domain dan semua subdomain-nya.
-        // PENTING: tls_cert_api harus wildcard cert (*.ulalaapi.store) agar
-        // mencakup image.ulalaapi.store, ui.ulalaapi.store, dll.
         if let (Some(cert_api), Some(key_api)) = (cfg.tls_cert_api.clone(), cfg.tls_key_api.clone())
         {
             use openssl::ssl::{NameType, SslAcceptor, SslFiletype, SslMethod};
@@ -492,11 +485,9 @@ pub fn build_proxy_service(
 
             tls.set_servername_callback(move |ssl, _alert| {
                 if let Some(sni) = ssl.servername(NameType::HOST_NAME) {
-                    // Match api_domain dan semua subdomain-nya
                     let matches = sni == api_domain_owned
                         || sni == format!("www.{}", api_domain_owned)
                         || sni.ends_with(&format!(".{}", api_domain_owned));
-
                     if matches {
                         ssl.set_ssl_context(&api_ctx)
                             .map_err(|_| openssl::ssl::SniError::NOACK)?;
@@ -527,17 +518,4 @@ pub fn build_redirect_service(
     svc.add_tcp(&cfg.http_redirect_addr);
     tracing::info!("HTTP redirect listener: {}", cfg.http_redirect_addr);
     svc
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-fn new_request_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = ts.as_secs() & 0xffff_ffff;
-    let nanos = ts.subsec_nanos();
-    let noise: u32 = (nanos ^ nanos.wrapping_mul(0x9e37_79b9)) & 0xffff;
-    format!("{:08x}{:08x}{:04x}", secs, nanos, noise)
 }
