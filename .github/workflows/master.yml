@@ -1,4 +1,5 @@
 name: Node Docker CI/CD
+
 on:
   push:
     branches: ["main"]
@@ -25,4 +26,6 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/pingora
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/pingora:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/pingora:${{ github.sha }}

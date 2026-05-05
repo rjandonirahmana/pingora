@@ -1,10 +1,7 @@
 # pingora — konfigurasi produksi ulala.space + ulalaapi.store
-#
-# Override dengan ENV:
-#   PROXY_LISTEN, PROXY_BACKEND, PROXY_FRONTEND, PROXY_IMAGE,
-#   PROXY_TLS_CERT_WEB, PROXY_TLS_KEY_WEB,
-#   PROXY_TLS_CERT_API, PROXY_TLS_KEY_API,
-#   PROXY_RATE_LIMIT_RPS
+
+# ── IMPORTANT FOR DOCKER ──────────────────────────────────────────────────────
+daemon: false # <<<<< HARUS ADA UNTUK CONTAINER!
 
 # ── Listener ──────────────────────────────────────────────────────────────────
 listen_addr: "0.0.0.0:443"
@@ -31,7 +28,7 @@ cors_origins:
   - "https://www.ulala.space"
 
 # ── Image cache ───────────────────────────────────────────────────────────────
-image_cache_days: 30 # sesuai nginx: expires 30d
+image_cache_days: 30
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 rate_limit_rps: 200
