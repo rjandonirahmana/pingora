@@ -6,12 +6,16 @@ RUN apt-get update && apt-get install -y \
     cmake \
     build-essential \
     protobuf-compiler \
+    musl-tools \
     && rm -rf /var/lib/apt/lists/*
+
+# Add musl target
+RUN rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /app
 COPY . .
 
-# Build dengan static linking untuk musl (tidak tergantung GLIBC)
+# Build dengan musl (static)
 RUN cargo build --release --target x86_64-unknown-linux-musl
 
 FROM alpine:latest
