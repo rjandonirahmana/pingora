@@ -1,4 +1,4 @@
-FROM rust:latest AS builder
+FROM rust:1.75-bullseye AS builder
 
 RUN apt-get update && apt-get install -y \
     pkg-config \
@@ -6,27 +6,32 @@ RUN apt-get update && apt-get install -y \
     cmake \
     build-essential \
     protobuf-compiler \
-    musl-tools \
     && rm -rf /var/lib/apt/lists/*
-
-# Add musl target
-RUN rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /app
 COPY . .
 
-# Build dengan musl (static)
-RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN cargo build --release
 
-FROM alpine:latest
+FROM debian:bullseye-slim
 
-RUN apk add --no-cache ca-certificates libssl3
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl1.1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy binary static
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/kinetic-proxy /usr/local/bin/kinetic-proxy
+COPY --from=builder /app/target/release/kinetic-proxy /usr/local/bin/kinetic-proxy
 COPY config.yaml /app/config.yaml
+
+# Fix daemon setting
+RUN sed -i 's/daemon: true/daemon: false/g' /app/config.yaml 2>/dev/null || true
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost/health || exit 1
 
 EXPOSE 80 443
 
