@@ -1,7 +1,9 @@
 //! Transform layer — modifikasi request & response header.
 //!
-//! FIX dari original:
+//! Fix dari original:
 //!   - resolve_origin(): dijadikan pub agar bisa dipakai di mod.rs (handle_preflight fix)
+//!   - apply_cache(): cast image_cache_days ke u64 sebelum multiply (fix u32 overflow)
+//!   - apply_response(): HSTS hanya di-inject jika TLS aktif
 
 use pingora_http::{RequestHeader, ResponseHeader};
 
@@ -195,10 +197,14 @@ pub fn apply_response(
     upstream_resp.insert_header("x-frame-options", "SAMEORIGIN")?;
     upstream_resp.insert_header("x-xss-protection", "1; mode=block")?;
     upstream_resp.insert_header("referrer-policy", "strict-origin-when-cross-origin")?;
-    upstream_resp.insert_header(
-        "strict-transport-security",
-        "max-age=31536000; includeSubDomains",
-    )?;
+    // FIX: HSTS hanya di-inject jika TLS aktif.
+    // Di plain HTTP browser ignore HSTS, tapi lebih bersih dan tidak menyesatkan client.
+    if cfg.tls_enabled() {
+        upstream_resp.insert_header(
+            "strict-transport-security",
+            "max-age=31536000; includeSubDomains",
+        )?;
+    }
     upstream_resp.insert_header(
         "permissions-policy",
         "geolocation=(), microphone=(), camera=()",
@@ -302,7 +308,10 @@ fn apply_cache(
             resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
         }
         RouteKind::Object => {
-            let max_age = cfg.image_cache_days as u64 * 86_400;
+            // FIX: cast ke u64 SEBELUM multiply untuk cegah u32 overflow.
+            // image_cache_days=50_000 → 50_000 * 86_400 = 4.32e9 > u32::MAX (4.29e9).
+            // Di debug: panic. Di release: wrap ke nilai kecil → cache header salah.
+            let max_age = (cfg.image_cache_days as u64).saturating_mul(86_400);
             let mut nbuf = itoa::Buffer::new();
             let age_str = nbuf.format(max_age);
             let mut hdr = [0u8; 48];

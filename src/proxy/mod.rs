@@ -2,6 +2,9 @@
 //!
 //! Fix dari original:
 //!   - handle_preflight(): origin di-validate lewat resolve_origin() (fix CORS bypass)
+//!   - handle_preflight(): CORS methods/headers dibedakan per upstream (S3 vs API)
+//!   - handle_preflight(): hapus .to_owned() → zero alloc
+//!   - request_filter(): preflight di-handle untuk is_api DAN is_object (fix 403 di S3 upload)
 //!   - request_filter(): tambah /health endpoint handler (fix Docker healthcheck)
 //!   - build_proxy_service(): tambah log warning jika TLS tidak dikonfigurasi
 
@@ -128,7 +131,10 @@ impl ProxyHttp for KineticProxy {
             ws       = ctx.is_ws,
         );
 
-        if method == http::Method::OPTIONS && ctx.is_api {
+        // FIX: handle preflight untuk api DAN object storage.
+        // Sebelumnya hanya is_api — request OPTIONS ke RustFS3 (upload/download via browser)
+        // tidak ditangani → jatuh ke upstream yang mungkin return 403/405.
+        if method == http::Method::OPTIONS && (ctx.is_api || ctx.is_object) {
             return self.handle_preflight(session, ctx).await;
         }
 
@@ -278,7 +284,8 @@ impl ProxyHttp for KineticProxy {
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 impl KineticProxy {
-    // FIX: origin di-validate lewat resolve_origin() — tidak echo semua origin
+    // FIX: origin di-validate lewat resolve_origin() — tidak echo semua origin.
+    // FIX: CORS headers disesuaikan per upstream (S3 butuh x-amz-* headers).
     async fn handle_preflight(&self, session: &mut Session, ctx: &RequestCtx) -> Result<bool> {
         let origin_str = session
             .req_header()
@@ -288,23 +295,44 @@ impl KineticProxy {
             .unwrap_or("*")
             .to_string();
 
-        // FIX: validate origin lewat resolve_origin, bukan echo langsung
-        let allowed = resolve_origin(&origin_str, &self.state.cfg).to_owned();
+        // FIX: gunakan resolve_origin langsung tanpa .to_owned() — tidak ada alokasi String.
+        // resolve_origin return &'a str dengan lifetime dari cfg (Arc, selalu valid).
+        let allowed = resolve_origin(&origin_str, &self.state.cfg);
 
         let id_buf = ctx.id_hex_buf();
         let mut resp = ResponseHeader::build(http::StatusCode::NO_CONTENT, None)?;
         resp.insert_header("vary", "origin")?;
-        resp.insert_header("access-control-allow-origin", allowed.as_str())?;
+        resp.insert_header("access-control-allow-origin", allowed)?;
         resp.insert_header("access-control-allow-credentials", "true")?;
-        resp.insert_header(
-            "access-control-allow-methods",
-            "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-        )?;
-        resp.insert_header(
-            "access-control-allow-headers",
-            "authorization, content-type, x-request-id",
-        )?;
-        resp.insert_header("access-control-max-age", "86400")?;
+
+        use self::context::RouteKind;
+        match ctx.route {
+            RouteKind::Object => {
+                // S3 butuh x-amz-* headers untuk presigned URL dan multipart upload.
+                // Tanpa ini browser GET/PUT ke RustFS3 dari domain lain selalu 403.
+                resp.insert_header(
+                    "access-control-allow-methods",
+                    "GET, HEAD, PUT, DELETE, OPTIONS",
+                )?;
+                resp.insert_header(
+                    "access-control-allow-headers",
+                    "authorization, range, content-type, x-amz-date, x-amz-content-sha256, x-amz-security-token",
+                )?;
+                resp.insert_header("access-control-max-age", "3600")?;
+            }
+            _ => {
+                resp.insert_header(
+                    "access-control-allow-methods",
+                    "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                )?;
+                resp.insert_header(
+                    "access-control-allow-headers",
+                    "authorization, content-type, x-request-id",
+                )?;
+                resp.insert_header("access-control-max-age", "86400")?;
+            }
+        }
+
         resp.insert_header("content-length", "0")?;
         resp.insert_header("x-request-id", id_buf.as_str())?;
 

@@ -6,6 +6,10 @@
 //!   - Tidak baca network / disk
 //!   - Return RouteDecision yang langsung bisa dipakai semua layer
 //!
+//! Fix dari original:
+//!   - is_static_path(): tambah extensi gambar/font umum (.png, .jpg, .webp, .woff2, dll)
+//!     agar cache header "public, max-age=31536000" di-set untuk asset frontend
+//!
 //! Rule (first-match):
 //!   1. web_domain                       → Frontend
 //!   2. image_subdomain                  → RustFS3 (no strip)
@@ -158,8 +162,18 @@ fn is_static_path(path: &str) -> bool {
     path.starts_with("/static/")
         || path.ends_with(".wasm")
         || path.ends_with(".js")
+        || path.ends_with(".mjs")
         || path.ends_with(".css")
         || path.ends_with(".ico")
+        || path.ends_with(".png")
+        || path.ends_with(".jpg")
+        || path.ends_with(".jpeg")
+        || path.ends_with(".webp")
+        || path.ends_with(".svg")
+        || path.ends_with(".woff")
+        || path.ends_with(".woff2")
+        || path.ends_with(".ttf")
+        || path.ends_with(".map")
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

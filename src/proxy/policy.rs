@@ -3,7 +3,9 @@
 //! Fix dari original:
 //!   - Bucket::try_consume(): load+check+sub → CAS loop (fix underflow race condition)
 //!   - Bucket refill: fetch_add+cap → fetch_update dengan .min(capacity) (fix overflow race)
+//!   - Bucket refill: gunakan compare_exchange pada last_refill (fix double-refill race)
 //!   - PolicyLayer::apply(): panggil waf_check untuk semua request, bukan hanya is_api
+//!   - waf_check(): hapus /.well-known/security.txt dari blocklist (false positive)
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -51,19 +53,28 @@ impl Bucket {
         let last = self.last_refill.load(Ordering::Relaxed);
         let elapsed = now.saturating_sub(last);
 
-        // Refill tokens jika ada waktu berlalu
+        // Refill tokens jika ada waktu berlalu.
+        // FIX: gunakan compare_exchange pada last_refill agar hanya 1 thread yang refill.
+        // Tanpa ini: thread A dan B sama-sama baca last=T, keduanya hitung refill, keduanya
+        // store → double refill (token bisa melebihi capacity secara efektif).
         if elapsed > 0 {
             let refill = (elapsed as u32)
                 .saturating_mul(refill_per_sec)
                 .min(capacity);
             if refill > 0 {
-                // FIX: fetch_update dengan .min(capacity) — atomic, tidak bisa overflow
-                self.tokens
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                        Some(cur.saturating_add(refill).min(capacity))
-                    })
-                    .ok();
-                self.last_refill.store(now, Ordering::Relaxed);
+                // Hanya thread yang menang CAS yang boleh refill.
+                if self
+                    .last_refill
+                    .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    self.tokens
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                            Some(cur.saturating_add(refill).min(capacity))
+                        })
+                        .ok();
+                }
+                // Thread yang kalah CAS: last_refill sudah diupdate thread lain, skip refill.
             }
         }
 
@@ -174,7 +185,10 @@ pub fn waf_check(path: &str, _method: &http::Method) -> Result<(), PolicyError> 
         return Err(PolicyError::SuspiciousRequest("oversized path"));
     }
 
-    // Scanner paths — linear scan over &[&str], no alloc
+    // Scanner paths — linear scan over &[&str], no alloc.
+    // NOTE: /.well-known/security.txt dihapus dari blocklist — ini path standar
+    // untuk security disclosure dan dipakai oleh tool legitimate (shodan, google).
+    // Hanya block /.well-known/acme-challenge bypass jika ada attack vector.
     const BLOCKED: &[&str] = &[
         "/wp-admin",
         "/wp-login",
@@ -185,7 +199,6 @@ pub fn waf_check(path: &str, _method: &http::Method) -> Result<(), PolicyError> 
         "/admin/config",
         "/actuator/",
         "/console/",
-        "/.well-known/security.txt",
     ];
     for &blocked in BLOCKED {
         if path.starts_with(blocked) {
