@@ -14,7 +14,7 @@ pub mod transform;
 pub mod upstream_pool;
 
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -59,6 +59,9 @@ impl ProxyState {
 
 pub struct KineticProxy {
     state: Arc<ProxyState>,
+    // OnceLock: cleanup task di-spawn tepat sekali saat request pertama masuk,
+    // yaitu saat Pingora runtime sudah aktif. tokio::spawn() sebelum runtime = panic.
+    cleanup_spawned: Arc<OnceLock<()>>,
 }
 
 #[async_trait]
@@ -71,6 +74,19 @@ impl ProxyHttp for KineticProxy {
 
     // ── Phase 1: Request filter — routing + policy ────────────────────────────
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        // Spawn cleanup task tepat sekali saat request pertama — Pingora runtime sudah aktif.
+        if self.cleanup_spawned.set(()).is_ok() {
+            let rate_limiter = Arc::clone(&self.state.policy.rate_limiter);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    rate_limiter.cleanup();
+                    tracing::debug!("Rate limiter active IPs: {}", rate_limiter.active_count());
+                }
+            });
+        }
+
         let req = session.req_header();
         let method = req.method.clone();
         let path = req.uri.path().to_string();
@@ -363,21 +379,6 @@ pub fn build_proxy_service(
 
     let policy = Arc::new(PolicyLayer::new(cfg.rate_limit_rps));
 
-    // ── Cleanup scheduler — fix memory leak RateLimiter ───────────────────────
-    // Jalankan cleanup setiap 60 detik di background task.
-    // DashMap.retain() tidak memerlukan write lock global — per-shard lock.
-    {
-        let rate_limiter = Arc::clone(&policy.rate_limiter);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                rate_limiter.cleanup();
-                tracing::debug!("Rate limiter active IPs: {}", rate_limiter.active_count());
-            }
-        });
-    }
-
     let state = Arc::new(ProxyState {
         cfg: Arc::clone(&cfg_arc),
         policy,
@@ -387,7 +388,10 @@ pub fn build_proxy_service(
         ui_pool: Arc::new(UpstreamPool::single(cfg.rustfs_ui_address.clone())),
     });
 
-    let proxy = KineticProxy { state };
+    let proxy = KineticProxy {
+        state,
+        cleanup_spawned: Arc::new(OnceLock::new()),
+    };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 
     if cfg.tls_enabled() {
