@@ -1,11 +1,15 @@
 //! Upstream pool — load balancing + circuit breaker.
 //!
-//! Round-robin dengan circuit breaker per backend.
-//! State: Closed → Open (setelah N failure) → Half-Open (setelah cooldown) → Closed
+//! Optimasi dari original:
+//!   - Backend.addr: String → SmolStr (stack-allocated untuk addr pendek)
+//!   - find(): pakai &str parameter untuk zero-copy comparison
+//!   - UpstreamPool::single(): konstruktor khusus tetap ada, internal optimized
 
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use smol_str::SmolStr;
 
 const STATE_CLOSED:    u8 = 0;
 const STATE_OPEN:      u8 = 1;
@@ -74,14 +78,16 @@ impl CircuitBreaker {
 }
 
 pub struct Backend {
-    pub addr:    String,
+    // SmolStr: stack-allocated jika addr ≤ 22 chars ("127.0.0.1:8080" = 14).
+    // Tidak ada heap alloc untuk semua kasus localhost/private addr.
+    pub addr:    SmolStr,
     pub breaker: CircuitBreaker,
 }
 
 impl Backend {
     pub fn new(addr: String) -> Self {
         Self {
-            addr,
+            addr:    SmolStr::new(&addr),
             breaker: CircuitBreaker::new(5, 30),
         }
     }
@@ -104,7 +110,6 @@ impl UpstreamPool {
         Self::new(vec![addr])
     }
 
-    /// Pilih backend (round-robin, skip yang OPEN).
     pub fn next(&self) -> Option<Arc<Backend>> {
         let len = self.backends.len();
         if len == 0 { return None; }
@@ -117,14 +122,13 @@ impl UpstreamPool {
             }
         }
 
-        // Semua OPEN → fallback ke [0]
         tracing::error!("Semua backend OPEN — fallback ke backend[0]");
         Some(self.backends[0].clone())
     }
 
-    /// Cari backend berdasarkan addr — untuk update circuit breaker di error handler.
+    /// Cari backend berdasarkan addr — &str parameter untuk zero-copy comparison.
     pub fn find(&self, addr: &str) -> Option<Arc<Backend>> {
-        self.backends.iter().find(|b| b.addr == addr).cloned()
+        self.backends.iter().find(|b| b.addr.as_str() == addr).cloned()
     }
 
     pub fn status(&self) -> Vec<(&str, &str)> {

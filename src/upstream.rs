@@ -39,7 +39,7 @@ impl Upstream {
         let host_bare = host.split(':').next().unwrap_or(host);
 
         // 1. Frontend (ulala.space)
-        let is_web = host_bare == cfg.web_domain || host_bare == format!("www.{}", cfg.web_domain);
+        let is_web = is_domain_match(host_bare, &cfg.web_domain);
         if is_web {
             return Upstream::Frontend;
         }
@@ -55,7 +55,7 @@ impl Upstream {
         }
 
         // 4-6. API domain (ulalaapi.store)
-        let is_api = host_bare == cfg.api_domain || host_bare == format!("www.{}", cfg.api_domain);
+        let is_api = is_domain_match(host_bare, &cfg.api_domain);
 
         if is_api {
             // Backward compat: /image/* → RustFS3 (strip akan dilakukan di proxy.rs)
@@ -90,6 +90,16 @@ impl Upstream {
             Upstream::RustFSUI => &cfg.rustfs_ui_address,
         }
     }
+}
+
+// Zero-alloc domain match — sama dengan router.rs, copy di sini untuk upstream.rs
+// yang tidak punya akses ke router module.
+#[inline]
+fn is_domain_match(host: &str, domain: &str) -> bool {
+    host == domain
+        || (host.len() == domain.len() + 4
+            && host.starts_with("www.")
+            && host.ends_with(domain))
 }
 
 #[cfg(test)]

@@ -1,0 +1,16 @@
+# Tambahkan dependency berikut ke [dependencies] di Cargo.toml:
+
+[dependencies]
+# DashMap — concurrent HashMap tanpa global RwLock.
+# Pengganti Arc<RwLock<HashMap>> di RateLimiter.
+# lock-free reads, per-shard write lock.
+dashmap = "6.0"
+
+# SmolStr — stack-allocated String untuk string pendek (≤22 bytes).
+# Dipakai untuk: client_ip_str, backend_addr, Backend.addr.
+# Zero heap alloc untuk semua IPv4/IPv6 address dan upstream addr.
+smol_str = "0.3"
+
+# itoa — integer → &str tanpa alloc, jauh lebih cepat dari .to_string().
+# Dipakai untuk: elapsed_ms header, content-length, retry-after.
+itoa = "1.0"

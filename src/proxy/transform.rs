@@ -1,7 +1,11 @@
 //! Transform layer — modifikasi request & response header.
 //!
-//! Dipisah dari proxy core supaya mudah di-test & di-extend.
-//! Semua fungsi pure atau near-pure (minimal side effect).
+//! Optimasi dari original:
+//!   - id_hex(): id_hex_buf() → stack buffer, no String alloc
+//!   - elapsed_ms().to_string(): elapsed_ms_buf() (itoa) → no String alloc
+//!   - format!("{}?{}", ...) di strip_prefix: dihindari untuk kasus no-query
+//!   - apply_cache Object: format!("public, max-age={}") → itoa + stack concat
+//!   - resolve_origin: return &str bukan String jika origin match (zero-copy fast path)
 
 use pingora_http::{RequestHeader, ResponseHeader};
 
@@ -10,8 +14,6 @@ use crate::proxy::context::{RequestCtx, RouteKind};
 
 // ─── MIME map ─────────────────────────────────────────────────────────────────
 
-/// Return MIME type dari ekstensi path.
-/// Inline + match table = compiler bisa optimize jadi jump table.
 #[inline]
 pub fn mime_from_path(path: &str) -> Option<&'static str> {
     let ext = path
@@ -20,60 +22,120 @@ pub fn mime_from_path(path: &str) -> Option<&'static str> {
         .unwrap_or("")
         .split('?')
         .next()
-        .unwrap_or("")
-        .to_lowercase();
+        .unwrap_or("");
 
-    // Diperluas dari sebelumnya — cover semua format umum
-    match ext.as_str() {
-        // Gambar
-        "png"           => Some("image/png"),
-        "jpg" | "jpeg"  => Some("image/jpeg"),
-        "gif"           => Some("image/gif"),
-        "webp"          => Some("image/webp"),
-        "svg"           => Some("image/svg+xml"),
-        "avif"          => Some("image/avif"),
-        "ico"           => Some("image/x-icon"),
-        "bmp"           => Some("image/bmp"),
-        "tiff" | "tif"  => Some("image/tiff"),
-        // Video
-        "mp4"           => Some("video/mp4"),
-        "webm"          => Some("video/webm"),
-        "mov"           => Some("video/quicktime"),
-        "avi"           => Some("video/x-msvideo"),
-        "mkv"           => Some("video/x-matroska"),
-        // Audio
-        "mp3"           => Some("audio/mpeg"),
-        "ogg"           => Some("audio/ogg"),
-        "wav"           => Some("audio/wav"),
-        "flac"          => Some("audio/flac"),
-        "m4a"           => Some("audio/mp4"),
-        // Dokumen
-        "pdf"           => Some("application/pdf"),
-        "txt"           => Some("text/plain; charset=utf-8"),
-        "json"          => Some("application/json"),
-        "xml"           => Some("application/xml"),
-        "csv"           => Some("text/csv"),
-        // Web
-        "html"          => Some("text/html; charset=utf-8"),
-        "css"           => Some("text/css"),
-        "js" | "mjs"    => Some("application/javascript"),
-        "wasm"          => Some("application/wasm"),
-        // Font
-        "woff"          => Some("font/woff"),
-        "woff2"         => Some("font/woff2"),
-        "ttf"           => Some("font/ttf"),
-        _               => None,
+    // Lowercase in-place via match — kita handle case-insensitive manual
+    // agar tidak perlu .to_lowercase() yang alloc String
+    match_ext_ci(ext)
+}
+
+fn match_ext_ci(ext: &str) -> Option<&'static str> {
+    // Case-insensitive tanpa alloc: compare byte-by-byte ignore case
+    let eq = |a: &str, b: &str| {
+        a.len() == b.len()
+            && a.bytes()
+                .zip(b.bytes())
+                .all(|(x, y)| x.to_ascii_lowercase() == y)
+    };
+
+    if eq(ext, "png") {
+        return Some("image/png");
     }
+    if eq(ext, "jpg") || eq(ext, "jpeg") {
+        return Some("image/jpeg");
+    }
+    if eq(ext, "gif") {
+        return Some("image/gif");
+    }
+    if eq(ext, "webp") {
+        return Some("image/webp");
+    }
+    if eq(ext, "svg") {
+        return Some("image/svg+xml");
+    }
+    if eq(ext, "avif") {
+        return Some("image/avif");
+    }
+    if eq(ext, "ico") {
+        return Some("image/x-icon");
+    }
+    if eq(ext, "bmp") {
+        return Some("image/bmp");
+    }
+    if eq(ext, "tiff") || eq(ext, "tif") {
+        return Some("image/tiff");
+    }
+    if eq(ext, "mp4") {
+        return Some("video/mp4");
+    }
+    if eq(ext, "webm") {
+        return Some("video/webm");
+    }
+    if eq(ext, "mov") {
+        return Some("video/quicktime");
+    }
+    if eq(ext, "avi") {
+        return Some("video/x-msvideo");
+    }
+    if eq(ext, "mkv") {
+        return Some("video/x-matroska");
+    }
+    if eq(ext, "mp3") {
+        return Some("audio/mpeg");
+    }
+    if eq(ext, "ogg") {
+        return Some("audio/ogg");
+    }
+    if eq(ext, "wav") {
+        return Some("audio/wav");
+    }
+    if eq(ext, "flac") {
+        return Some("audio/flac");
+    }
+    if eq(ext, "m4a") {
+        return Some("audio/mp4");
+    }
+    if eq(ext, "pdf") {
+        return Some("application/pdf");
+    }
+    if eq(ext, "txt") {
+        return Some("text/plain; charset=utf-8");
+    }
+    if eq(ext, "json") {
+        return Some("application/json");
+    }
+    if eq(ext, "xml") {
+        return Some("application/xml");
+    }
+    if eq(ext, "csv") {
+        return Some("text/csv");
+    }
+    if eq(ext, "html") {
+        return Some("text/html; charset=utf-8");
+    }
+    if eq(ext, "css") {
+        return Some("text/css");
+    }
+    if eq(ext, "js") || eq(ext, "mjs") {
+        return Some("application/javascript");
+    }
+    if eq(ext, "wasm") {
+        return Some("application/wasm");
+    }
+    if eq(ext, "woff") {
+        return Some("font/woff");
+    }
+    if eq(ext, "woff2") {
+        return Some("font/woff2");
+    }
+    if eq(ext, "ttf") {
+        return Some("font/ttf");
+    }
+    None
 }
 
 // ─── Request transform ────────────────────────────────────────────────────────
 
-/// Modifikasi request sebelum dikirim ke upstream.
-///
-/// Urutan operasi:
-///   1. Strip path prefix (kalau ada)
-///   2. Set Host header (sesuai upstream type)
-///   3. Set forwarding headers
 pub fn apply_request(
     upstream_req: &mut RequestHeader,
     ctx: &RequestCtx,
@@ -85,37 +147,39 @@ pub fn apply_request(
         let stripped = path.strip_prefix(prefix).unwrap_or("/");
         let stripped = if stripped.is_empty() { "/" } else { stripped };
 
-        let new_pq = match upstream_req.uri.query() {
-            Some(q) => format!("{}?{}", stripped, q),
-            None    => stripped.to_string(),
+        // Hindari format!() jika tidak ada query string (kasus paling umum)
+        let new_uri = match upstream_req.uri.query() {
+            None => http::Uri::builder().path_and_query(stripped).build()?,
+            Some(q) => {
+                // Hanya alloc jika ada query string — rare case
+                let pq = format!("{}?{}", stripped, q);
+                http::Uri::builder().path_and_query(pq.as_str()).build()?
+            }
         };
-
-        let new_uri = http::Uri::builder()
-            .path_and_query(new_pq.as_str())
-            .build()?;
         upstream_req.set_uri(new_uri);
     }
 
     // ── 2. Host header ────────────────────────────────────────────────────────
-    // RustFS: preserve original host (virtual-host routing & CSRF protection)
-    // Semua lain: set ke upstream addr
     use crate::upstream::Upstream;
     let host_val = match ctx.upstream {
         Upstream::RustFS3 | Upstream::RustFSUI => {
-            ctx.host.split(':').next().unwrap_or(&ctx.host).to_string()
+            // split(':').next() — zero alloc, return slice of existing String
+            ctx.host.split(':').next().unwrap_or(&ctx.host)
         }
-        _ => ctx.upstream.addr(cfg).to_string(),
+        _ => ctx.upstream.addr(cfg),
     };
-    upstream_req.insert_header("host", &host_val)?;
+    upstream_req.insert_header("host", host_val)?;
 
     // ── 3. Forwarding headers ─────────────────────────────────────────────────
-    upstream_req.insert_header("x-request-id",       &ctx.id_hex())?;
-    upstream_req.insert_header("x-forwarded-proto",  "https")?;
-    upstream_req.insert_header("x-forwarded-host",   &ctx.host)?;
+    // id_hex_buf(): zero alloc (stack buffer 16 bytes)
+    let id_buf = ctx.id_hex_buf();
+    upstream_req.insert_header("x-request-id", id_buf.as_str())?;
+    upstream_req.insert_header("x-forwarded-proto", "https")?;
+    upstream_req.insert_header("x-forwarded-host", ctx.host.as_str())?;
 
     if !ctx.client_ip_str.is_empty() {
-        upstream_req.insert_header("x-real-ip",       &ctx.client_ip_str)?;
-        upstream_req.append_header("x-forwarded-for", &ctx.client_ip_str)?;
+        upstream_req.insert_header("x-real-ip", ctx.client_ip_str.as_str())?;
+        upstream_req.append_header("x-forwarded-for", ctx.client_ip_str.as_str())?;
     }
 
     Ok(())
@@ -123,48 +187,42 @@ pub fn apply_request(
 
 // ─── Response transform ───────────────────────────────────────────────────────
 
-/// Modifikasi response sebelum dikembalikan ke client.
-///
-/// Pipeline:
-///   1. CORS
-///   2. Cache headers (per RouteKind)
-///   3. Content-Type + Content-Disposition (untuk object storage)
-///   4. Security headers (semua response)
-///   5. Metadata headers (request ID, served-by)
 pub fn apply_response(
     upstream_resp: &mut ResponseHeader,
     ctx: &RequestCtx,
     cfg: &Config,
     origin: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // ── 1. CORS ───────────────────────────────────────────────────────────────
     apply_cors(upstream_resp, ctx, cfg, origin)?;
-
-    // ── 2. Cache ──────────────────────────────────────────────────────────────
     apply_cache(upstream_resp, ctx, cfg)?;
 
-    // ── 3. Content-Type + Content-Disposition (object storage) ───────────────
     if ctx.is_object {
         if let Some(mime) = mime_from_path(&ctx.path) {
             upstream_resp.insert_header("content-type", mime)?;
         }
-        // SELALU inline — ini fix utama masalah download.
-        // insert_header() di Pingora REPLACE header upstream yang mungkin "attachment".
         upstream_resp.insert_header("content-disposition", "inline")?;
     }
 
-    // ── 4. Security headers ───────────────────────────────────────────────────
-    upstream_resp.insert_header("x-content-type-options",            "nosniff")?;
-    upstream_resp.insert_header("x-frame-options",                   "SAMEORIGIN")?;
-    upstream_resp.insert_header("x-xss-protection",                  "1; mode=block")?;
-    upstream_resp.insert_header("referrer-policy",                   "strict-origin-when-cross-origin")?;
-    upstream_resp.insert_header("strict-transport-security",         "max-age=31536000; includeSubDomains")?;
-    upstream_resp.insert_header("permissions-policy",                "geolocation=(), microphone=(), camera=()")?;
+    // Security headers — &'static str, no alloc
+    upstream_resp.insert_header("x-content-type-options", "nosniff")?;
+    upstream_resp.insert_header("x-frame-options", "SAMEORIGIN")?;
+    upstream_resp.insert_header("x-xss-protection", "1; mode=block")?;
+    upstream_resp.insert_header("referrer-policy", "strict-origin-when-cross-origin")?;
+    upstream_resp.insert_header(
+        "strict-transport-security",
+        "max-age=31536000; includeSubDomains",
+    )?;
+    upstream_resp.insert_header(
+        "permissions-policy",
+        "geolocation=(), microphone=(), camera=()",
+    )?;
 
-    // ── 5. Metadata ───────────────────────────────────────────────────────────
-    upstream_resp.insert_header("x-request-id", &ctx.id_hex())?;
-    upstream_resp.insert_header("x-served-by",  "kinetic-proxy")?;
-    upstream_resp.insert_header("x-elapsed-ms", &ctx.elapsed_ms().to_string())?;
+    // Metadata — ZERO ALLOC menggunakan stack buffers
+    let id_buf = ctx.id_hex_buf();
+    let mut elapsed_buf = ctx.elapsed_ms_buf();
+    upstream_resp.insert_header("x-request-id", id_buf.as_str())?;
+    upstream_resp.insert_header("x-served-by", "kinetic-proxy")?;
+    upstream_resp.insert_header("x-elapsed-ms", elapsed_buf.format(ctx.elapsed_ms()))?;
 
     Ok(())
 }
@@ -181,7 +239,7 @@ fn apply_cors(
 
     let origin = match origin {
         Some(o) if !o.is_empty() => o,
-        _ => return Ok(()), // tidak ada Origin header → skip CORS
+        _ => return Ok(()),
     };
 
     let allowed = resolve_origin(origin, cfg);
@@ -189,20 +247,35 @@ fn apply_cors(
     match ctx.upstream {
         Upstream::Backend => {
             if ctx.is_api {
-                resp.insert_header("access-control-allow-origin",      &allowed)?;
+                resp.insert_header("access-control-allow-origin", allowed)?;
                 resp.insert_header("access-control-allow-credentials", "true")?;
-                resp.insert_header("access-control-allow-methods",     "GET, POST, PUT, PATCH, DELETE, OPTIONS")?;
-                resp.insert_header("access-control-allow-headers",     "authorization, content-type, x-request-id")?;
-                resp.insert_header("access-control-expose-headers",    "x-request-id, x-elapsed-ms")?;
-                resp.insert_header("access-control-max-age",           "86400")?;
+                resp.insert_header(
+                    "access-control-allow-methods",
+                    "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                )?;
+                resp.insert_header(
+                    "access-control-allow-headers",
+                    "authorization, content-type, x-request-id",
+                )?;
+                resp.insert_header(
+                    "access-control-expose-headers",
+                    "x-request-id, x-elapsed-ms",
+                )?;
+                resp.insert_header("access-control-max-age", "86400")?;
             }
         }
         Upstream::RustFS3 => {
-            resp.insert_header("access-control-allow-origin",      &allowed)?;
+            resp.insert_header("access-control-allow-origin", allowed)?;
             resp.insert_header("access-control-allow-credentials", "true")?;
-            resp.insert_header("access-control-allow-methods",     "GET, HEAD, PUT, DELETE, OPTIONS")?;
-            resp.insert_header("access-control-allow-headers",     "authorization, range, content-type, x-amz-date, x-amz-content-sha256")?;
-            resp.insert_header("access-control-max-age",           "3600")?;
+            resp.insert_header(
+                "access-control-allow-methods",
+                "GET, HEAD, PUT, DELETE, OPTIONS",
+            )?;
+            resp.insert_header(
+                "access-control-allow-headers",
+                "authorization, range, content-type, x-amz-date, x-amz-content-sha256",
+            )?;
+            resp.insert_header("access-control-max-age", "3600")?;
         }
         _ => {}
     }
@@ -210,11 +283,14 @@ fn apply_cors(
     Ok(())
 }
 
-fn resolve_origin(origin: &str, cfg: &Config) -> String {
+/// Resolve origin — zero alloc fast path: return &str dari origin atau cors_origins.
+/// Hanya alloc String jika origin tidak match DAN ada fallback non-"*".
+fn resolve_origin<'a>(origin: &'a str, cfg: &'a Config) -> &'a str {
     if cfg.cors_origins.iter().any(|o| o == "*" || o == origin) {
-        origin.to_string()
+        origin // Fast path: zero alloc, return input reference
     } else {
-        cfg.cors_origins.first().cloned().unwrap_or_else(|| "*".into())
+        // Fallback: return first allowed origin atau "*"
+        cfg.cors_origins.first().map(|s| s.as_str()).unwrap_or("*")
     }
 }
 
@@ -225,29 +301,32 @@ fn apply_cache(
     ctx: &RequestCtx,
     cfg: &Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let cache = match ctx.route {
+    match ctx.route {
         RouteKind::Static => {
-            // Immutable static assets — 1 tahun
-            "public, max-age=31536000, immutable"
+            resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
         }
         RouteKind::Object => {
-            // Image/video — configurable (default 30 hari)
-            return {
-                let max_age = cfg.image_cache_days as u64 * 86_400;
-                resp.insert_header("cache-control", &format!("public, max-age={}", max_age))?;
-                Ok(())
-            };
+            // Zero alloc: gunakan stack buffer untuk u64 → str conversion
+            let max_age = cfg.image_cache_days as u64 * 86_400;
+            let mut nbuf = itoa::Buffer::new();
+            let age_str = nbuf.format(max_age);
+            // Stack-allocated concat: "public, max-age=" + number
+            // Max len: 16 + 20 = 36 bytes — fits in a small stack array
+            let mut hdr = [0u8; 48];
+            let prefix = b"public, max-age=";
+            let age_b = age_str.as_bytes();
+            hdr[..prefix.len()].copy_from_slice(prefix);
+            hdr[prefix.len()..prefix.len() + age_b.len()].copy_from_slice(age_b);
+            let hdr_str = std::str::from_utf8(&hdr[..prefix.len() + age_b.len()])
+                .unwrap_or("public, max-age=2592000");
+            resp.insert_header("cache-control", hdr_str)?;
         }
         RouteKind::Api | RouteKind::Websocket => {
-            // API — no cache
-            "no-store"
+            resp.insert_header("cache-control", "no-store")?;
         }
         RouteKind::Dashboard => {
-            // Console UI — revalidate
-            "no-cache, must-revalidate"
+            resp.insert_header("cache-control", "no-cache, must-revalidate")?;
         }
-    };
-
-    resp.insert_header("cache-control", cache)?;
+    }
     Ok(())
 }

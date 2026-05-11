@@ -1,11 +1,19 @@
 //! RequestCtx — central state untuk satu request.
 //! Diisi sekali, dibaca di semua layer. Zero recompute.
+//!
+//! Optimasi dari original:
+//!   - host, path: tetap String (dibaca dari Session header, harus owned untuk lifetime)
+//!   - client_ip_str: SmolStr — stack-allocated untuk IPv4/IPv6 str (max 45 chars)
+//!   - backend_addr: SmolStr — addr upstream biasanya pendek (e.g. "127.0.0.1:8080")
+//!   - id_hex(): tidak return String baru — tulis ke stack buffer caller via id_hex_buf()
+//!   - Tambahan id_hex_bytes() untuk insert_header tanpa intermediate String
 
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use http::Method;
+use smol_str::SmolStr;
 
 use crate::proxy::router::RouteDecision;
 use crate::upstream::Upstream;
@@ -61,6 +69,18 @@ impl TimeoutConfig {
     }
 }
 
+// ─── HexBuf — stack-allocated 16-char hex string ─────────────────────────────
+
+/// Buffer stack untuk format "{:016x}" — 16 bytes, no heap allocation.
+pub struct HexBuf([u8; 16]);
+
+impl HexBuf {
+    pub fn as_str(&self) -> &str {
+        // Safety: kita tulis ASCII hex digits saja
+        unsafe { std::str::from_utf8_unchecked(&self.0) }
+    }
+}
+
 // ─── RequestCtx ──────────────────────────────────────────────────────────────
 
 pub struct RequestCtx {
@@ -73,7 +93,7 @@ pub struct RequestCtx {
     pub route:        RouteKind,
     pub timeout:      TimeoutConfig,
 
-    // Request info
+    // Request info — host & path harus String (owned untuk lifetime independence)
     pub host:         String,
     pub path:         String,
     pub method:       Method,
@@ -89,10 +109,12 @@ pub struct RequestCtx {
 
     // Client info
     pub client_ip:     Option<IpAddr>,
-    pub client_ip_str: String,
+    // SmolStr: stack-allocated jika ≤ 22 bytes (cukup untuk semua IPv4 "255.255.255.255:65535"
+    // dan IPv6 "::1" dll). Tidak ada heap alloc untuk kasus umum.
+    pub client_ip_str: SmolStr,
 
-    // Backend addr yang terpilih — untuk circuit breaker lookup di error handler
-    pub backend_addr:  String,
+    // Backend addr yang terpilih — SmolStr: "127.0.0.1:8080" = 14 bytes, fits on stack.
+    pub backend_addr:  SmolStr,
 
     // Retry counter
     pub attempts:      u8,
@@ -109,7 +131,10 @@ impl RequestCtx {
         let route   = RouteKind::from_decision(&decision);
         let timeout = TimeoutConfig::for_route(route);
 
-        let client_ip_str = client_ip.map(|ip| ip.to_string()).unwrap_or_default();
+        // SmolStr::new() — stack jika ≤ 22 chars (true untuk semua IP string)
+        let client_ip_str = client_ip
+            .map(|ip| SmolStr::new(ip.to_string()))
+            .unwrap_or_default();
 
         Self {
             id:           next_id(),
@@ -127,7 +152,7 @@ impl RequestCtx {
             strip_prefix: decision.strip_prefix,
             client_ip,
             client_ip_str,
-            backend_addr: String::new(), // diisi di upstream_peer
+            backend_addr: SmolStr::default(), // diisi di upstream_peer
             attempts:     0,
         }
     }
@@ -137,32 +162,57 @@ impl RequestCtx {
         self.started_at.elapsed().as_millis() as u64
     }
 
+    /// Zero-alloc hex ID: tulis ke stack buffer, return reference.
+    /// Gunakan ini di insert_header() daripada id_hex() yang return String.
+    #[inline]
+    pub fn id_hex_buf(&self) -> HexBuf {
+        let mut buf = [0u8; 16];
+        // Manual hex encoding ke stack buffer — no format!, no alloc
+        let id = self.id;
+        const HEX: &[u8] = b"0123456789abcdef";
+        for i in 0..8 {
+            let byte = ((id >> ((7 - i) * 8)) & 0xff) as u8;
+            buf[i * 2]     = HEX[(byte >> 4) as usize];
+            buf[i * 2 + 1] = HEX[(byte & 0xf) as usize];
+        }
+        HexBuf(buf)
+    }
+
+    /// Backward compat — dipakai di logging. Untuk insert_header pakai id_hex_buf().
     #[inline]
     pub fn id_hex(&self) -> String {
         format!("{:016x}", self.id)
+    }
+
+    /// Zero-alloc elapsed string: tulis u64 ke stack buffer.
+    #[inline]
+    pub fn elapsed_ms_buf(&self) -> itoa::Buffer {
+        let mut buf = itoa::Buffer::new();
+        let _ = buf.format(self.elapsed_ms());
+        buf
     }
 }
 
 impl Default for RequestCtx {
     fn default() -> Self {
         Self {
-            id:           0,
-            started_at:   Instant::now(),
-            upstream:     Upstream::Frontend,
-            route:        RouteKind::Static,
-            timeout:      TimeoutConfig::for_route(RouteKind::Static),
-            host:         String::new(),
-            path:         String::new(),
-            method:       Method::GET,
-            is_ws:        false,
-            is_static:    true,
-            is_api:       false,
-            is_object:    false,
-            strip_prefix: None,
-            client_ip:    None,
-            client_ip_str: String::new(),
-            backend_addr: String::new(),
-            attempts:     0,
+            id:            0,
+            started_at:    Instant::now(),
+            upstream:      Upstream::Frontend,
+            route:         RouteKind::Static,
+            timeout:       TimeoutConfig::for_route(RouteKind::Static),
+            host:          String::new(),
+            path:          String::new(),
+            method:        Method::GET,
+            is_ws:         false,
+            is_static:     true,
+            is_api:        false,
+            is_object:     false,
+            strip_prefix:  None,
+            client_ip:     None,
+            client_ip_str: SmolStr::default(),
+            backend_addr:  SmolStr::default(),
+            attempts:      0,
         }
     }
 }

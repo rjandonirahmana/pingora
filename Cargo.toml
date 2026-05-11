@@ -19,6 +19,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
 openssl = "0.10.79"
 http = "1.4.0"
+smol_str = "0.3.6"
+itoa = "1.0.18"
+dashmap = "6.1.0"
 
 [[bin]]
 name = "kinetic-proxy"
