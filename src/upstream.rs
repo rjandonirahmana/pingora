@@ -97,9 +97,7 @@ impl Upstream {
 #[inline]
 fn is_domain_match(host: &str, domain: &str) -> bool {
     host == domain
-        || (host.len() == domain.len() + 4
-            && host.starts_with("www.")
-            && host.ends_with(domain))
+        || (host.len() == domain.len() + 4 && host.starts_with("www.") && host.ends_with(domain))
 }
 
 #[cfg(test)]
@@ -114,7 +112,6 @@ mod tests {
             ui_subdomain: "ui.ulalaapi.store".into(),
             backend_addr: "127.0.0.1:8080".into(),
             frontend_addr: "127.0.0.1:3100".into(),
-            image_addr: "127.0.0.1:3902".into(),
             rustfs_s3_address: "127.0.0.1:9000".into(),
             rustfs_ui_address: "127.0.0.1:9001".into(),
             ..Config::default()

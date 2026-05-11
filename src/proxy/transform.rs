@@ -1,11 +1,7 @@
 //! Transform layer — modifikasi request & response header.
 //!
-//! Optimasi dari original:
-//!   - id_hex(): id_hex_buf() → stack buffer, no String alloc
-//!   - elapsed_ms().to_string(): elapsed_ms_buf() (itoa) → no String alloc
-//!   - format!("{}?{}", ...) di strip_prefix: dihindari untuk kasus no-query
-//!   - apply_cache Object: format!("public, max-age={}") → itoa + stack concat
-//!   - resolve_origin: return &str bukan String jika origin match (zero-copy fast path)
+//! FIX dari original:
+//!   - resolve_origin(): dijadikan pub agar bisa dipakai di mod.rs (handle_preflight fix)
 
 use pingora_http::{RequestHeader, ResponseHeader};
 
@@ -24,13 +20,10 @@ pub fn mime_from_path(path: &str) -> Option<&'static str> {
         .next()
         .unwrap_or("");
 
-    // Lowercase in-place via match — kita handle case-insensitive manual
-    // agar tidak perlu .to_lowercase() yang alloc String
     match_ext_ci(ext)
 }
 
 fn match_ext_ci(ext: &str) -> Option<&'static str> {
-    // Case-insensitive tanpa alloc: compare byte-by-byte ignore case
     let eq = |a: &str, b: &str| {
         a.len() == b.len()
             && a.bytes()
@@ -147,11 +140,9 @@ pub fn apply_request(
         let stripped = path.strip_prefix(prefix).unwrap_or("/");
         let stripped = if stripped.is_empty() { "/" } else { stripped };
 
-        // Hindari format!() jika tidak ada query string (kasus paling umum)
         let new_uri = match upstream_req.uri.query() {
             None => http::Uri::builder().path_and_query(stripped).build()?,
             Some(q) => {
-                // Hanya alloc jika ada query string — rare case
                 let pq = format!("{}?{}", stripped, q);
                 http::Uri::builder().path_and_query(pq.as_str()).build()?
             }
@@ -162,16 +153,12 @@ pub fn apply_request(
     // ── 2. Host header ────────────────────────────────────────────────────────
     use crate::upstream::Upstream;
     let host_val = match ctx.upstream {
-        Upstream::RustFS3 | Upstream::RustFSUI => {
-            // split(':').next() — zero alloc, return slice of existing String
-            ctx.host.split(':').next().unwrap_or(&ctx.host)
-        }
+        Upstream::RustFS3 | Upstream::RustFSUI => ctx.host.split(':').next().unwrap_or(&ctx.host),
         _ => ctx.upstream.addr(cfg),
     };
     upstream_req.insert_header("host", host_val)?;
 
     // ── 3. Forwarding headers ─────────────────────────────────────────────────
-    // id_hex_buf(): zero alloc (stack buffer 16 bytes)
     let id_buf = ctx.id_hex_buf();
     upstream_req.insert_header("x-request-id", id_buf.as_str())?;
     upstream_req.insert_header("x-forwarded-proto", "https")?;
@@ -217,7 +204,6 @@ pub fn apply_response(
         "geolocation=(), microphone=(), camera=()",
     )?;
 
-    // Metadata — ZERO ALLOC menggunakan stack buffers
     let id_buf = ctx.id_hex_buf();
     let mut elapsed_buf = ctx.elapsed_ms_buf();
     upstream_resp.insert_header("x-request-id", id_buf.as_str())?;
@@ -285,6 +271,8 @@ fn apply_cors(
     Ok(())
 }
 
+/// FIX: dijadikan `pub` agar bisa dipakai di mod.rs untuk validasi preflight CORS.
+///
 /// Resolve origin — zero alloc fast path: return &str dari origin atau cors_origins.
 ///
 /// Urutan pengecekan:
@@ -292,16 +280,13 @@ fn apply_cors(
 ///   2. origin di cors_origins     → allow (production list)
 ///   3. origin di dev_origins      → allow (localhost dev: 3000, 5173, dll)
 ///   4. Tidak match                → fallback ke first cors_origin atau "*"
-fn resolve_origin<'a>(origin: &'a str, cfg: &'a Config) -> &'a str {
-    // Production list — termasuk wildcard
+pub fn resolve_origin<'a>(origin: &'a str, cfg: &'a Config) -> &'a str {
     if cfg.cors_origins.iter().any(|o| o == "*" || o == origin) {
         return origin;
     }
-    // Dev origins — diisi di config.yaml saat dev, kosongkan saat production deploy
     if cfg.dev_origins.iter().any(|o| o == origin) {
         return origin;
     }
-    // Fallback: first allowed origin atau "*"
     cfg.cors_origins.first().map(|s| s.as_str()).unwrap_or("*")
 }
 
@@ -317,12 +302,9 @@ fn apply_cache(
             resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
         }
         RouteKind::Object => {
-            // Zero alloc: gunakan stack buffer untuk u64 → str conversion
             let max_age = cfg.image_cache_days as u64 * 86_400;
             let mut nbuf = itoa::Buffer::new();
             let age_str = nbuf.format(max_age);
-            // Stack-allocated concat: "public, max-age=" + number
-            // Max len: 16 + 20 = 36 bytes — fits in a small stack array
             let mut hdr = [0u8; 48];
             let prefix = b"public, max-age=";
             let age_b = age_str.as_bytes();

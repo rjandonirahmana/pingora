@@ -1,11 +1,9 @@
 //! proxy/ — Cloudflare-style layered proxy pipeline.
 //!
-//! Optimasi dari original:
-//!   - build_proxy_service(): Arc::new(cfg) tanpa .clone() (Config hanya di-load sekali)
-//!   - Policy cleanup scheduler: tokio::interval tiap 60 detik (fix memory leak RateLimiter)
-//!   - policy.apply(): async → sync (DashMap tidak butuh .await)
-//!   - ctx.backend_addr: String → SmolStr (diisi via SmolStr::new)
-//!   - reject(): error_response sekarang return &'static slice, bukan Vec
+//! Fix dari original:
+//!   - handle_preflight(): origin di-validate lewat resolve_origin() (fix CORS bypass)
+//!   - request_filter(): tambah /health endpoint handler (fix Docker healthcheck)
+//!   - build_proxy_service(): tambah log warning jika TLS tidak dikonfigurasi
 
 pub mod context;
 pub mod policy;
@@ -31,6 +29,7 @@ use crate::upstream::Upstream;
 
 use self::context::RequestCtx;
 use self::policy::{PolicyError, PolicyLayer};
+use self::transform::resolve_origin;
 use self::upstream_pool::{Backend, UpstreamPool};
 
 // ─── ProxyState ───────────────────────────────────────────────────────────────
@@ -96,6 +95,20 @@ impl ProxyHttp for KineticProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
+
+        // FIX: Health check endpoint — handle sebelum routing, return 200 OK langsung.
+        // Diperlukan untuk Docker HEALTHCHECK dan load balancer probe.
+        if path == "/health" || path == "/healthz" {
+            let mut resp = ResponseHeader::build(http::StatusCode::OK, None)?;
+            resp.insert_header("content-type", "text/plain")?;
+            resp.insert_header("content-length", "2")?;
+            resp.insert_header("x-served-by", "kinetic-proxy")?;
+            session.write_response_header(Box::new(resp), false).await?;
+            session
+                .write_response_body(Some(bytes::Bytes::from_static(b"ok")), true)
+                .await?;
+            return Ok(true);
+        }
 
         let client_ip: Option<IpAddr> = session
             .client_addr()
@@ -265,8 +278,9 @@ impl ProxyHttp for KineticProxy {
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 impl KineticProxy {
+    // FIX: origin di-validate lewat resolve_origin() — tidak echo semua origin
     async fn handle_preflight(&self, session: &mut Session, ctx: &RequestCtx) -> Result<bool> {
-        let origin = session
+        let origin_str = session
             .req_header()
             .headers
             .get("origin")
@@ -274,10 +288,13 @@ impl KineticProxy {
             .unwrap_or("*")
             .to_string();
 
+        // FIX: validate origin lewat resolve_origin, bukan echo langsung
+        let allowed = resolve_origin(&origin_str, &self.state.cfg).to_owned();
+
         let id_buf = ctx.id_hex_buf();
         let mut resp = ResponseHeader::build(http::StatusCode::NO_CONTENT, None)?;
         resp.insert_header("vary", "origin")?;
-        resp.insert_header("access-control-allow-origin", origin.as_str())?;
+        resp.insert_header("access-control-allow-origin", allowed.as_str())?;
         resp.insert_header("access-control-allow-credentials", "true")?;
         resp.insert_header(
             "access-control-allow-methods",
@@ -372,13 +389,13 @@ pub fn build_proxy_service(
     cfg: &Config,
     server: &mut Server,
 ) -> impl pingora_core::services::Service {
-    // FIX: Arc::new(cfg.clone()) → wrap langsung, Config tidak perlu di-clone.
-    // Tapi karena cfg adalah &Config (reference), kita clone sekali di sini —
-    // yang penting tidak double-clone seperti sebelumnya.
     let cfg_arc = Arc::new(cfg.clone());
 
     let policy = Arc::new(PolicyLayer::new(cfg.rate_limit_rps));
 
+    // NOTE: rustfs_s3_address dipakai untuk s3_pool.
+    // image_addr di Config adalah field lama (Garage S3 :3902) — tidak dipakai.
+    // Jika perlu Garage, ganti rustfs_s3_address → image_addr di config.yaml.
     let state = Arc::new(ProxyState {
         cfg: Arc::clone(&cfg_arc),
         policy,
@@ -416,13 +433,11 @@ pub fn build_proxy_service(
             let api_ctx = api_builder.build().into_context();
 
             // Pre-compute SNI match strings SEKALI saat startup — zero alloc per handshake.
-            // Box<str> bukan String: immutable, tidak bisa di-grow, sedikit lebih kecil.
-            let api_domain: Box<str> = cfg.api_domain.as_str().into(); // Box<str>
+            let api_domain: Box<str> = cfg.api_domain.as_str().into();
             let api_domain_www = format!("www.{}", cfg.api_domain).into_boxed_str();
             let api_domain_sub = format!(".{}", cfg.api_domain).into_boxed_str();
             tls.set_servername_callback(move |ssl, _| {
                 if let Some(sni) = ssl.servername(NameType::HOST_NAME) {
-                    // Semua comparison: &str == &str, zero alloc
                     let matches = sni == &*api_domain
                         || sni == &*api_domain_www
                         || sni.ends_with(&*api_domain_sub);
@@ -439,6 +454,15 @@ pub fn build_proxy_service(
         svc.add_tls_with_settings(&cfg.listen_addr, None, tls);
         tracing::info!("HTTPS :443 ready");
     } else {
+        // FIX: Warning jelas jika TLS tidak dikonfigurasi — ini mungkin penyebab
+        // ulala.space tidak bisa diakses (browser expect HTTPS tapi dapat HTTP)
+        tracing::warn!(
+            "⚠️  TLS TIDAK DIKONFIGURASI — proxy berjalan sebagai plain HTTP di {}",
+            cfg.listen_addr
+        );
+        tracing::warn!(
+            "   Set tls_cert_web + tls_key_web di config.yaml atau env PROXY_TLS_CERT_WEB / PROXY_TLS_KEY_WEB"
+        );
         svc.add_tcp(&cfg.listen_addr);
         tracing::info!("HTTP (no TLS) {} ready", cfg.listen_addr);
     }

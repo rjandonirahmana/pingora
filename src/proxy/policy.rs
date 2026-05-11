@@ -1,12 +1,9 @@
 //! Policy layer — rate limiting, WAF dasar, header validation.
 //!
-//! Perubahan dari original:
-//!   - RateLimiter: RwLock<HashMap> → DashMap (lock-free concurrent reads/writes)
-//!   - RateLimiter: MAX_BUCKETS cap (100k) mencegah OOM dari DDoS IP spoofing
-//!   - RateLimiter: check() sekarang sync (DashMap tidak butuh .await)
-//!   - blocked_ips: Vec<IpAddr> → HashSet<IpAddr> untuk O(1) lookup
-//!   - WAF: SuspiciousRequest alloc String → &'static str (zero alloc)
-//!   - PolicyLayer::error_response: Vec return → &'static slice (zero alloc)
+//! Fix dari original:
+//!   - Bucket::try_consume(): load+check+sub → CAS loop (fix underflow race condition)
+//!   - Bucket refill: fetch_add+cap → fetch_update dengan .min(capacity) (fix overflow race)
+//!   - PolicyLayer::apply(): panggil waf_check untuk semua request, bukan hanya is_api
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -26,7 +23,9 @@ const MAX_BUCKETS: usize = 100_000;
 
 #[derive(Debug)]
 pub enum PolicyError {
-    RateLimited { retry_after_secs: u64 },
+    RateLimited {
+        retry_after_secs: u64,
+    },
     BlockedIp,
     /// &'static str: zero alloc — semua reason adalah string literal
     SuspiciousRequest(&'static str),
@@ -35,47 +34,63 @@ pub enum PolicyError {
 // ─── Rate Limiter (Token Bucket) ──────────────────────────────────────────────
 
 struct Bucket {
-    tokens:      AtomicU32,
+    tokens: AtomicU32,
     last_refill: AtomicU64, // unix seconds
 }
 
 impl Bucket {
     fn new(capacity: u32) -> Self {
         Self {
-            tokens:      AtomicU32::new(capacity),
+            tokens: AtomicU32::new(capacity),
             last_refill: AtomicU64::new(now_secs()),
         }
     }
 
     fn try_consume(&self, capacity: u32, refill_per_sec: u32) -> bool {
-        let now     = now_secs();
-        let last    = self.last_refill.load(Ordering::Relaxed);
+        let now = now_secs();
+        let last = self.last_refill.load(Ordering::Relaxed);
         let elapsed = now.saturating_sub(last);
 
+        // Refill tokens jika ada waktu berlalu
         if elapsed > 0 {
-            let refill = (elapsed as u32).saturating_mul(refill_per_sec).min(capacity);
+            let refill = (elapsed as u32)
+                .saturating_mul(refill_per_sec)
+                .min(capacity);
             if refill > 0 {
-                self.tokens.fetch_add(refill, Ordering::Relaxed);
-                let cur = self.tokens.load(Ordering::Relaxed);
-                if cur > capacity {
-                    self.tokens.store(capacity, Ordering::Relaxed);
-                }
+                // FIX: fetch_update dengan .min(capacity) — atomic, tidak bisa overflow
+                self.tokens
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                        Some(cur.saturating_add(refill).min(capacity))
+                    })
+                    .ok();
                 self.last_refill.store(now, Ordering::Relaxed);
             }
         }
 
-        let cur = self.tokens.load(Ordering::Relaxed);
-        if cur == 0 { return false; }
-        self.tokens.fetch_sub(1, Ordering::Relaxed);
-        true
+        // FIX: CAS loop — atomic compare-and-swap, tidak ada race condition underflow
+        loop {
+            let cur = self.tokens.load(Ordering::Relaxed);
+            if cur == 0 {
+                return false;
+            }
+            match self.tokens.compare_exchange_weak(
+                cur,
+                cur - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue, // retry jika ada thread lain yang modify lebih cepat
+            }
+        }
     }
 }
 
 pub struct RateLimiter {
     // DashMap: sharded RwLock internal — concurrent reads & writes tanpa global lock.
     // Jauh lebih cepat dari Arc<RwLock<HashMap>> di high-concurrency.
-    buckets:        Arc<DashMap<IpAddr, Arc<Bucket>>>,
-    capacity:       u32,
+    buckets: Arc<DashMap<IpAddr, Arc<Bucket>>>,
+    capacity: u32,
     refill_per_sec: u32,
 }
 
@@ -83,8 +98,8 @@ impl RateLimiter {
     pub fn new(rps: u64) -> Self {
         let rps = rps as u32;
         Self {
-            buckets:        Arc::new(DashMap::with_capacity(1024)),
-            capacity:       rps * 3,
+            buckets: Arc::new(DashMap::with_capacity(1024)),
+            capacity: rps * 3,
             refill_per_sec: rps,
         }
     }
@@ -96,7 +111,9 @@ impl RateLimiter {
             return if bucket.try_consume(self.capacity, self.refill_per_sec) {
                 Ok(())
             } else {
-                Err(PolicyError::RateLimited { retry_after_secs: 1 })
+                Err(PolicyError::RateLimited {
+                    retry_after_secs: 1,
+                })
             };
         }
 
@@ -104,7 +121,9 @@ impl RateLimiter {
         if self.buckets.len() >= MAX_BUCKETS {
             // Bucket penuh → tolak request daripada leak memory.
             // Ini correct behavior saat DDoS: semua IP baru di-rate-limit.
-            return Err(PolicyError::RateLimited { retry_after_secs: 60 });
+            return Err(PolicyError::RateLimited {
+                retry_after_secs: 60,
+            });
         }
 
         let bucket = Arc::new(Bucket::new(self.capacity));
@@ -118,12 +137,15 @@ impl RateLimiter {
     pub fn cleanup(&self) {
         let cutoff = now_secs().saturating_sub(3600);
         let before = self.buckets.len();
-        self.buckets.retain(|_, bucket| bucket.last_refill.load(Ordering::Relaxed) > cutoff);
+        self.buckets
+            .retain(|_, bucket| bucket.last_refill.load(Ordering::Relaxed) > cutoff);
         let after = self.buckets.len();
         if before != after {
             tracing::info!(
                 "Rate limiter cleanup: {} → {} active IPs (removed {})",
-                before, after, before - after
+                before,
+                after,
+                before - after
             );
         }
     }
@@ -154,9 +176,16 @@ pub fn waf_check(path: &str, _method: &http::Method) -> Result<(), PolicyError> 
 
     // Scanner paths — linear scan over &[&str], no alloc
     const BLOCKED: &[&str] = &[
-        "/wp-admin", "/wp-login", "/.env", "/.git/",
-        "/phpinfo", "/phpmyadmin", "/admin/config",
-        "/actuator/", "/console/", "/.well-known/security.txt",
+        "/wp-admin",
+        "/wp-login",
+        "/.env",
+        "/.git/",
+        "/phpinfo",
+        "/phpmyadmin",
+        "/admin/config",
+        "/actuator/",
+        "/console/",
+        "/.well-known/security.txt",
     ];
     for &blocked in BLOCKED {
         if path.starts_with(blocked) {
@@ -172,27 +201,28 @@ pub fn waf_check(path: &str, _method: &http::Method) -> Result<(), PolicyError> 
 pub struct PolicyLayer {
     pub rate_limiter: Arc<RateLimiter>,
     // HashSet: O(1) lookup vs Vec O(n)
-    blocked_ips:      HashSet<IpAddr>,
+    blocked_ips: HashSet<IpAddr>,
 }
 
 impl PolicyLayer {
     pub fn new(rate_limit_rps: u64) -> Self {
         Self {
             rate_limiter: Arc::new(RateLimiter::new(rate_limit_rps)),
-            blocked_ips:  HashSet::new(),
+            blocked_ips: HashSet::new(),
         }
     }
 
     pub fn with_blocked_ips(rate_limit_rps: u64, blocked: Vec<IpAddr>) -> Self {
         Self {
             rate_limiter: Arc::new(RateLimiter::new(rate_limit_rps)),
-            blocked_ips:  blocked.into_iter().collect(),
+            blocked_ips: blocked.into_iter().collect(),
         }
     }
 
     /// Sync apply — tidak perlu async karena DashMap tidak memerlukan .await.
     pub fn apply(&self, ctx: &RequestCtx) -> Result<(), PolicyError> {
-        if ctx.is_api {
+        // WAF check untuk semua path non-static (bukan hanya API)
+        if !ctx.is_static {
             waf_check(&ctx.path, &ctx.method)?;
         }
 
@@ -210,7 +240,9 @@ impl PolicyLayer {
     }
 
     /// Zero alloc: return static slice reference, tidak alokasi Vec baru per request.
-    pub fn error_response(err: &PolicyError) -> (http::StatusCode, &'static [(&'static str, &'static str)]) {
+    pub fn error_response(
+        err: &PolicyError,
+    ) -> (http::StatusCode, &'static [(&'static str, &'static str)]) {
         match err {
             PolicyError::RateLimited { .. } => (
                 http::StatusCode::TOO_MANY_REQUESTS,

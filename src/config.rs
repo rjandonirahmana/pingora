@@ -1,6 +1,11 @@
 //! Konfigurasi kinetic-proxy.
 //!
 //! Prioritas: ENV > config.yaml > default.
+//!
+//! FIX dari original:
+//!   - Hapus image_addr (field lama :3902 yang tidak dipakai, menyesatkan)
+//!   - Hapus upstream_pool_size (tidak dipakai di UpstreamPool)
+//!   - Tambah doc comment yang jelas untuk masing-masing field
 
 use serde::Deserialize;
 use std::fs;
@@ -31,16 +36,15 @@ pub struct Config {
     #[serde(default = "default_backend")]
     pub backend_addr: String,
 
-    /// Upstream Leptos / static-web-server, e.g. "127.0.0.1:3100"
+    /// Upstream Leptos / static-web-server frontend, e.g. "127.0.0.1:3100"
+    /// ulala.space/* → sini
     #[serde(default = "default_frontend")]
     pub frontend_addr: String,
 
-    /// Upstream Garage S3 web (untuk /image/), e.g. "127.0.0.1:3902"
-    #[serde(default = "default_image")]
-    pub image_addr: String,
-
     // ── TLS ───────────────────────────────────────────────────────────────────
     /// Sertifikat TLS untuk web_domain (fullchain.pem)
+    /// WAJIB diset agar browser bisa akses ulala.space via HTTPS.
+    /// Tanpa ini proxy berjalan plain HTTP di :443 → browser reject.
     pub tls_cert_web: Option<String>,
 
     /// Private key TLS untuk web_domain (privkey.pem)
@@ -59,7 +63,6 @@ pub struct Config {
 
     /// Origin tambahan untuk development local — tidak aktif di production.
     /// Contoh: ["http://localhost:3000", "http://localhost:5173"]
-    /// Default: kosong. Cukup isi di config.yaml saat dev, kosongkan saat deploy.
     #[serde(default)]
     pub dev_origins: Vec<String>,
 
@@ -73,22 +76,24 @@ pub struct Config {
     #[serde(default = "default_rate_limit")]
     pub rate_limit_rps: u64,
 
-    // ── Connection pool ───────────────────────────────────────────────────────
-    /// Max koneksi ke upstream
-    #[serde(default = "default_pool")]
-    pub upstream_pool_size: usize,
-
-    #[serde(default = "default_rustfs_ui")]
-    pub rustfs_ui_address: String,
-
+    // ── RustFS ────────────────────────────────────────────────────────────────
+    /// Upstream RustFS S3 API, e.g. "127.0.0.1:9000"
+    /// Route: ulalaapi.store/image/* dan image.ulalaapi.store/*
     #[serde(default = "default_rustfs_s3")]
     pub rustfs_s3_address: String,
 
-    #[serde(default = "default_ui_subdomain")]
-    pub ui_subdomain: String,
+    /// Upstream RustFS Web Console, e.g. "127.0.0.1:9001"
+    /// Route: ui.ulalaapi.store/*
+    #[serde(default = "default_rustfs_ui")]
+    pub rustfs_ui_address: String,
 
+    /// Subdomain untuk RustFS S3 storage, e.g. "image.ulalaapi.store"
     #[serde(default = "default_image_subdomain")]
     pub image_subdomain: String,
+
+    /// Subdomain untuk RustFS Web Console, e.g. "ui.ulalaapi.store"
+    #[serde(default = "default_ui_subdomain")]
+    pub ui_subdomain: String,
 }
 
 impl Config {
@@ -112,9 +117,6 @@ impl Config {
         }
         if let Ok(v) = std::env::var("PROXY_FRONTEND") {
             cfg.frontend_addr = v;
-        }
-        if let Ok(v) = std::env::var("PROXY_IMAGE") {
-            cfg.image_addr = v;
         }
         if let Ok(v) = std::env::var("PROXY_TLS_CERT_WEB") {
             cfg.tls_cert_web = Some(v);
@@ -150,7 +152,6 @@ impl Default for Config {
             api_domain: default_api_domain(),
             backend_addr: default_backend(),
             frontend_addr: default_frontend(),
-            image_addr: default_image(),
             tls_cert_web: None,
             tls_key_web: None,
             tls_cert_api: None,
@@ -159,7 +160,6 @@ impl Default for Config {
             dev_origins: Vec::new(),
             image_cache_days: default_image_cache_days(),
             rate_limit_rps: default_rate_limit(),
-            upstream_pool_size: default_pool(),
             rustfs_s3_address: default_rustfs_s3(),
             rustfs_ui_address: default_rustfs_ui(),
             ui_subdomain: default_ui_subdomain(),
@@ -186,9 +186,6 @@ fn default_backend() -> String {
 fn default_frontend() -> String {
     "127.0.0.1:3100".into()
 }
-fn default_image() -> String {
-    "127.0.0.1:3902".into()
-}
 fn default_cors_origins() -> Vec<String> {
     vec!["*".into()]
 }
@@ -198,17 +195,12 @@ fn default_image_cache_days() -> u32 {
 fn default_rate_limit() -> u64 {
     200
 }
-fn default_pool() -> usize {
-    64
-}
-
 fn default_rustfs_ui() -> String {
     "127.0.0.1:9001".into()
 }
 fn default_rustfs_s3() -> String {
     "127.0.0.1:9000".into()
 }
-
 fn default_ui_subdomain() -> String {
     "ui.ulalaapi.store".into()
 }
