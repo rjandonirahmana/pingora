@@ -247,6 +247,7 @@ fn apply_cors(
     match ctx.upstream {
         Upstream::Backend => {
             if ctx.is_api {
+                resp.insert_header("vary", "origin")?;
                 resp.insert_header("access-control-allow-origin", allowed)?;
                 resp.insert_header("access-control-allow-credentials", "true")?;
                 resp.insert_header(
@@ -265,6 +266,7 @@ fn apply_cors(
             }
         }
         Upstream::RustFS3 => {
+            resp.insert_header("vary", "origin")?;
             resp.insert_header("access-control-allow-origin", allowed)?;
             resp.insert_header("access-control-allow-credentials", "true")?;
             resp.insert_header(
@@ -284,14 +286,23 @@ fn apply_cors(
 }
 
 /// Resolve origin — zero alloc fast path: return &str dari origin atau cors_origins.
-/// Hanya alloc String jika origin tidak match DAN ada fallback non-"*".
+///
+/// Urutan pengecekan:
+///   1. cors_origins berisi "*"    → allow (wildcard)
+///   2. origin di cors_origins     → allow (production list)
+///   3. origin di dev_origins      → allow (localhost dev: 3000, 5173, dll)
+///   4. Tidak match                → fallback ke first cors_origin atau "*"
 fn resolve_origin<'a>(origin: &'a str, cfg: &'a Config) -> &'a str {
+    // Production list — termasuk wildcard
     if cfg.cors_origins.iter().any(|o| o == "*" || o == origin) {
-        origin // Fast path: zero alloc, return input reference
-    } else {
-        // Fallback: return first allowed origin atau "*"
-        cfg.cors_origins.first().map(|s| s.as_str()).unwrap_or("*")
+        return origin;
     }
+    // Dev origins — diisi di config.yaml saat dev, kosongkan saat production deploy
+    if cfg.dev_origins.iter().any(|o| o == origin) {
+        return origin;
+    }
+    // Fallback: first allowed origin atau "*"
+    cfg.cors_origins.first().map(|s| s.as_str()).unwrap_or("*")
 }
 
 // ─── Cache ────────────────────────────────────────────────────────────────────

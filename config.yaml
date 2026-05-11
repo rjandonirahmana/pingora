@@ -38,3 +38,13 @@ rate_limit_rps: 200
 
 # ── Connection pool ───────────────────────────────────────────────────────────
 upstream_pool_size: 64
+
+# ── Dev origins (HANYA untuk development local) ───────────────────────────────
+# Aktifkan saat dev, kosongkan atau hapus saat production deploy.
+# Tidak ada overhead di production jika list kosong (Vec::iter().any() = false).
+# Tambah port lain sesuai kebutuhan (Vite default 5173, CRA 3000, dll).
+dev_origins:
+  - "http://localhost:3000"
+  - "http://localhost:5173"
+  - "http://localhost:4000"
+  # - "http://127.0.0.1:3000"  # uncomment jika pakai 127.0.0.1 bukan localhost

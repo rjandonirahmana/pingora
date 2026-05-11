@@ -260,6 +260,7 @@ impl KineticProxy {
 
         let id_buf = ctx.id_hex_buf();
         let mut resp = ResponseHeader::build(http::StatusCode::NO_CONTENT, None)?;
+        resp.insert_header("vary", "origin")?;
         resp.insert_header("access-control-allow-origin", origin.as_str())?;
         resp.insert_header("access-control-allow-credentials", "true")?;
         resp.insert_header(

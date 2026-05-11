@@ -57,6 +57,12 @@ pub struct Config {
     #[serde(default = "default_cors_origins")]
     pub cors_origins: Vec<String>,
 
+    /// Origin tambahan untuk development local — tidak aktif di production.
+    /// Contoh: ["http://localhost:3000", "http://localhost:5173"]
+    /// Default: kosong. Cukup isi di config.yaml saat dev, kosongkan saat deploy.
+    #[serde(default)]
+    pub dev_origins: Vec<String>,
+
     // ── Cache ─────────────────────────────────────────────────────────────────
     /// Berapa hari cache header untuk /image/* (0 = nonaktif)
     #[serde(default = "default_image_cache_days")]
@@ -150,6 +156,7 @@ impl Default for Config {
             tls_cert_api: None,
             tls_key_api: None,
             cors_origins: default_cors_origins(),
+            dev_origins: Vec::new(),
             image_cache_days: default_image_cache_days(),
             rate_limit_rps: default_rate_limit(),
             upstream_pool_size: default_pool(),
