@@ -4,23 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pingora         = { version = "0.8.0", features = ["lb", "openssl"] }
-pingora-core    = "0.8.0"
-pingora-http    = "0.8.0"
-pingora-proxy   = "0.8.0"
-# pingora-load-balancing dan pingora-limits tidak dipakai — hapus untuk kurangi compile time & binary size
-async-trait     = "0.1"
-tokio           = { version = "1", features = ["full"] }
-serde           = { version = "1", features = ["derive"] }
-serde_yaml      = "0.9"
-tracing         = "0.1"
+pingora      = { version = "0.8.0", features = ["lb", "openssl"] }
+pingora-core = "0.8.0"
+pingora-http = "0.8.0"
+pingora-proxy = "0.8.0"
+async-trait  = "0.1"
+tokio        = { version = "1", features = ["full"] }
+serde        = { version = "1", features = ["derive"] }
+serde_yaml   = "0.9"
+tracing      = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-bytes           = "1"
-openssl         = "0.10"
-http            = "1"
-smol_str        = "0.3"
-itoa            = "1"
-dashmap         = "6"
+bytes        = "1"
+openssl      = "0.10"
+http         = "1"
+smol_str     = "0.3"
+itoa         = "1"
+dashmap      = "6"
 
 [[bin]]
 name = "kinetic-proxy"
@@ -28,10 +27,7 @@ path = "src/main.rs"
 
 [profile.release]
 opt-level     = 3
-lto           = "thin"        # link-time optimization — kecilkan binary, kurangi overhead
-codegen-units = 1             # slower compile, better optimization
-strip         = "symbols"     # hapus debug symbols dari binary — hemat ~40% ukuran
-panic         = "abort"       # tidak perlu stack unwinding info — hemat memory runtime
-
-[profile.release.package."*"]
-opt-level = 3
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+panic         = "abort"

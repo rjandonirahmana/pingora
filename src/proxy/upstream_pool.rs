@@ -11,24 +11,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use smol_str::SmolStr;
 
-const STATE_CLOSED:    u8 = 0;
-const STATE_OPEN:      u8 = 1;
+const STATE_CLOSED: u8 = 0;
+const STATE_OPEN: u8 = 1;
 const STATE_HALF_OPEN: u8 = 2;
 
 pub struct CircuitBreaker {
-    state:         AtomicU8,
-    failures:      AtomicU32,
-    last_failure:  AtomicU64,
-    threshold:     u32,
+    state: AtomicU8,
+    failures: AtomicU32,
+    last_failure: AtomicU64,
+    threshold: u32,
     cooldown_secs: u64,
 }
 
 impl CircuitBreaker {
     pub fn new(threshold: u32, cooldown_secs: u64) -> Self {
         Self {
-            state:         AtomicU8::new(STATE_CLOSED),
-            failures:      AtomicU32::new(0),
-            last_failure:  AtomicU64::new(0),
+            state: AtomicU8::new(STATE_CLOSED),
+            failures: AtomicU32::new(0),
+            last_failure: AtomicU64::new(0),
             threshold,
             cooldown_secs,
         }
@@ -37,13 +37,17 @@ impl CircuitBreaker {
     pub fn allow(&self) -> bool {
         match self.state.load(Ordering::Acquire) {
             STATE_CLOSED => true,
-            STATE_OPEN   => {
+            STATE_OPEN => {
                 let elapsed = now_secs().saturating_sub(self.last_failure.load(Ordering::Relaxed));
                 if elapsed >= self.cooldown_secs {
-                    self.state.compare_exchange(
-                        STATE_OPEN, STATE_HALF_OPEN,
-                        Ordering::Release, Ordering::Relaxed,
-                    ).ok();
+                    self.state
+                        .compare_exchange(
+                            STATE_OPEN,
+                            STATE_HALF_OPEN,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        )
+                        .ok();
                     true
                 } else {
                     false
@@ -69,10 +73,10 @@ impl CircuitBreaker {
 
     pub fn state_name(&self) -> &'static str {
         match self.state.load(Ordering::Relaxed) {
-            STATE_CLOSED    => "closed",
-            STATE_OPEN      => "open",
+            STATE_CLOSED => "closed",
+            STATE_OPEN => "open",
             STATE_HALF_OPEN => "half-open",
-            _               => "unknown",
+            _ => "unknown",
         }
     }
 }
@@ -80,14 +84,14 @@ impl CircuitBreaker {
 pub struct Backend {
     // SmolStr: stack-allocated jika addr ≤ 22 chars ("127.0.0.1:8080" = 14).
     // Tidak ada heap alloc untuk semua kasus localhost/private addr.
-    pub addr:    SmolStr,
+    pub addr: SmolStr,
     pub breaker: CircuitBreaker,
 }
 
 impl Backend {
     pub fn new(addr: String) -> Self {
         Self {
-            addr:    SmolStr::new(&addr),
+            addr: SmolStr::new(&addr),
             breaker: CircuitBreaker::new(5, 30),
         }
     }
@@ -95,14 +99,17 @@ impl Backend {
 
 pub struct UpstreamPool {
     backends: Vec<Arc<Backend>>,
-    counter:  AtomicU32,
+    counter: AtomicU32,
 }
 
 impl UpstreamPool {
     pub fn new(addrs: Vec<String>) -> Self {
         Self {
-            backends: addrs.into_iter().map(|a| Arc::new(Backend::new(a))).collect(),
-            counter:  AtomicU32::new(0),
+            backends: addrs
+                .into_iter()
+                .map(|a| Arc::new(Backend::new(a)))
+                .collect(),
+            counter: AtomicU32::new(0),
         }
     }
 
@@ -112,7 +119,9 @@ impl UpstreamPool {
 
     pub fn next(&self) -> Option<Arc<Backend>> {
         let len = self.backends.len();
-        if len == 0 { return None; }
+        if len == 0 {
+            return None;
+        }
 
         let start = self.counter.fetch_add(1, Ordering::Relaxed) as usize;
         for i in 0..len {
@@ -128,11 +137,17 @@ impl UpstreamPool {
 
     /// Cari backend berdasarkan addr — &str parameter untuk zero-copy comparison.
     pub fn find(&self, addr: &str) -> Option<Arc<Backend>> {
-        self.backends.iter().find(|b| b.addr.as_str() == addr).cloned()
+        self.backends
+            .iter()
+            .find(|b| b.addr.as_str() == addr)
+            .cloned()
     }
 
     pub fn status(&self) -> Vec<(&str, &str)> {
-        self.backends.iter().map(|b| (b.addr.as_str(), b.breaker.state_name())).collect()
+        self.backends
+            .iter()
+            .map(|b| (b.addr.as_str(), b.breaker.state_name()))
+            .collect()
     }
 }
 
