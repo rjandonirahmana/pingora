@@ -956,8 +956,6 @@ dependencies = [
  "pingora",
  "pingora-core",
  "pingora-http",
- "pingora-limits",
- "pingora-load-balancing",
  "pingora-proxy",
  "serde",
  "serde_yaml",
@@ -1396,15 +1394,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0286fb5a0359dca1e2e137dfe14ca4d94f676635a5eae4616bb3d8d4ce06d120"
 dependencies = [
  "crc32fast",
-]
-
-[[package]]
-name = "pingora-limits"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7568624fc0e2f11fa32d27053ac862048b40bad98140b07a11d82f1b4989700"
-dependencies = [
- "ahash",
 ]
 
 [[package]]

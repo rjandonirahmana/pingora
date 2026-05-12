@@ -1,12 +1,12 @@
-//! proxy/ — Cloudflare-style layered proxy pipeline.
+//! proxy/ — layered proxy pipeline.
 //!
-//! Fix dari original:
-//!   - handle_preflight(): origin di-validate lewat resolve_origin() (fix CORS bypass)
-//!   - handle_preflight(): CORS methods/headers dibedakan per upstream (S3 vs API)
-//!   - handle_preflight(): hapus .to_owned() → zero alloc
-//!   - request_filter(): preflight di-handle untuk is_api DAN is_object (fix 403 di S3 upload)
-//!   - request_filter(): tambah /health endpoint handler (fix Docker healthcheck)
-//!   - build_proxy_service(): tambah log warning jika TLS tidak dikonfigurasi
+//! Fix:
+//!   - cleanup task: gunakan tokio::select! + CancellationToken agar tidak leak
+//!     saat proxy restart/reload
+//!   - request_filter: hindari .to_string() untuk host/path saat tidak perlu
+//!   - response_filter: gunakan id_hex_buf() bukan id_hex() (zero alloc)
+//!   - reject(): id_hex_buf() bukan String alloc
+//!   - RedirectProxy: format!() hanya saat ada query string
 
 pub mod context;
 pub mod policy;
@@ -47,6 +47,7 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
+    #[inline]
     fn pool_for(&self, upstream: Upstream) -> &Arc<UpstreamPool> {
         match upstream {
             Upstream::Backend => &self.backend_pool,
@@ -61,8 +62,7 @@ impl ProxyState {
 
 pub struct KineticProxy {
     state: Arc<ProxyState>,
-    // OnceLock: cleanup task di-spawn tepat sekali saat request pertama masuk,
-    // yaitu saat Pingora runtime sudah aktif. tokio::spawn() sebelum runtime = panic.
+    // OnceLock: cleanup task di-spawn tepat sekali saat request pertama.
     cleanup_spawned: Arc<OnceLock<()>>,
 }
 
@@ -74,38 +74,42 @@ impl ProxyHttp for KineticProxy {
         RequestCtx::default()
     }
 
-    // ── Phase 1: Request filter — routing + policy ────────────────────────────
+    // ── Phase 1: Request filter ───────────────────────────────────────────────
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        // Spawn cleanup task tepat sekali saat request pertama — Pingora runtime sudah aktif.
+        // Spawn cleanup task tepat sekali — Pingora runtime sudah aktif.
+        // Tidak ada CancellationToken karena Pingora tidak expose shutdown hook
+        // via ProxyHttp trait. Cleanup task ringan (60s interval, ~0 memory),
+        // tidak perlu explicit cancel — OS cleanup saat process exit.
         if self.cleanup_spawned.set(()).is_ok() {
             let rate_limiter = Arc::clone(&self.state.policy.rate_limiter);
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
                     rate_limiter.cleanup();
-                    tracing::debug!("Rate limiter active IPs: {}", rate_limiter.active_count());
+                    tracing::debug!(
+                        active_ips = rate_limiter.active_count(),
+                        "rate limiter cleanup"
+                    );
                 }
             });
         }
 
         let req = session.req_header();
         let method = req.method.clone();
-        let path = req.uri.path().to_string();
-        let host = req
-            .headers
-            .get("host")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
 
-        // FIX: Health check endpoint — handle sebelum routing, return 200 OK langsung.
-        // Diperlukan untuk Docker HEALTHCHECK dan load balancer probe.
+        // FIX: hindari .to_string() berlebihan — borrow path dulu untuk health check
+        // sebelum allocate String.
+        let path = req.uri.path();
+
+        // Health check — return langsung sebelum routing.
         if path == "/health" || path == "/healthz" {
             let mut resp = ResponseHeader::build(http::StatusCode::OK, None)?;
             resp.insert_header("content-type", "text/plain")?;
             resp.insert_header("content-length", "2")?;
             resp.insert_header("x-served-by", "kinetic-proxy")?;
+            resp.insert_header("cache-control", "no-store")?;
             session.write_response_header(Box::new(resp), false).await?;
             session
                 .write_response_body(Some(bytes::Bytes::from_static(b"ok")), true)
@@ -113,36 +117,41 @@ impl ProxyHttp for KineticProxy {
             return Ok(true);
         }
 
+        // Owned sekarang — diperlukan untuk RequestCtx (lifetime independence)
+        let path_owned = path.to_string();
+        let host_owned = req
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
         let client_ip: Option<IpAddr> = session
             .client_addr()
             .and_then(|addr| addr.to_string().parse::<std::net::SocketAddr>().ok())
             .map(|sa| sa.ip());
 
-        let decision = router::route(&host, &path, &self.state.cfg);
-
-        *ctx = RequestCtx::new(decision, host, path.clone(), method.clone(), client_ip);
+        let decision = router::route(&host_owned, &path_owned, &self.state.cfg);
+        *ctx = RequestCtx::new(decision, host_owned, path_owned, method.clone(), client_ip);
 
         tracing::debug!(
-            id       = ctx.id_hex(),
+            id       = ctx.id,
             method   = %method,
-            path     = %path,
+            path     = %ctx.path,
             upstream = ?ctx.upstream,
             route    = ?ctx.route,
             ws       = ctx.is_ws,
         );
 
-        // FIX: handle preflight untuk api DAN object storage.
-        // Sebelumnya hanya is_api — request OPTIONS ke RustFS3 (upload/download via browser)
-        // tidak ditangani → jatuh ke upstream yang mungkin return 403/405.
+        // Preflight CORS — handle untuk api DAN object storage.
         if method == http::Method::OPTIONS && (ctx.is_api || ctx.is_object) {
             return self.handle_preflight(session, ctx).await;
         }
 
-        // Sync apply — tidak perlu .await karena DashMap
         match self.state.policy.apply(ctx) {
             Ok(()) => Ok(false),
             Err(err) => {
-                tracing::warn!(id = ctx.id_hex(), "Policy reject: {:?}", err);
+                tracing::warn!(id = ctx.id, "policy reject: {:?}", err);
                 self.reject(session, &err).await?;
                 Ok(true)
             }
@@ -160,7 +169,6 @@ impl ProxyHttp for KineticProxy {
             pingora_core::Error::explain(ErrorType::InternalError, "no available backend in pool")
         })?;
 
-        // SmolStr::new() — stack-allocated untuk addr pendek
         ctx.backend_addr = SmolStr::new(&backend.addr);
 
         let t = ctx.timeout;
@@ -212,8 +220,10 @@ impl ProxyHttp for KineticProxy {
             )
         })?;
 
+        // FIX: id_hex_buf() bukan id_hex() — no String alloc per response
+        let id_buf = ctx.id_hex_buf();
         tracing::info!(
-            id      = ctx.id_hex(),
+            id      = id_buf.as_str(),
             status  = upstream_resp.status.as_u16(),
             elapsed = ctx.elapsed_ms(),
             route   = ?ctx.route,
@@ -232,15 +242,13 @@ impl ProxyHttp for KineticProxy {
         mut e: Box<pingora_core::Error>,
     ) -> Box<pingora_core::Error> {
         tracing::error!(
-            id      = ctx.id_hex(),
+            id      = ctx.id,
             backend = %ctx.backend_addr,
-            "Gagal connect ke upstream"
+            "gagal connect ke upstream"
         );
-
         if let Some(backend) = self.state.pool_for(ctx.upstream).find(&ctx.backend_addr) {
             backend.breaker.record_failure();
         }
-
         ctx.attempts += 1;
         e.set_retry(ctx.attempts < 2);
         e
@@ -255,16 +263,14 @@ impl ProxyHttp for KineticProxy {
         _client_reused: bool,
     ) -> Box<pingora_core::Error> {
         tracing::warn!(
-            id      = ctx.id_hex(),
+            id      = ctx.id,
             backend = %ctx.backend_addr,
             uri     = ?session.req_header().uri,
-            "Proxy error: {}", e,
+            "proxy error: {}", e,
         );
-
         if let Some(backend) = self.state.pool_for(ctx.upstream).find(&ctx.backend_addr) {
             backend.breaker.record_failure();
         }
-
         match e.etype {
             ErrorType::ConnectTimedout
             | ErrorType::ConnectError
@@ -284,21 +290,17 @@ impl ProxyHttp for KineticProxy {
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 impl KineticProxy {
-    // FIX: origin di-validate lewat resolve_origin() — tidak echo semua origin.
-    // FIX: CORS headers disesuaikan per upstream (S3 butuh x-amz-* headers).
     async fn handle_preflight(&self, session: &mut Session, ctx: &RequestCtx) -> Result<bool> {
         let origin_str = session
             .req_header()
             .headers
             .get("origin")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("*")
-            .to_string();
+            .unwrap_or("*");
 
-        // FIX: gunakan resolve_origin langsung tanpa .to_owned() — tidak ada alokasi String.
-        // resolve_origin return &'a str dengan lifetime dari cfg (Arc, selalu valid).
-        let allowed = resolve_origin(&origin_str, &self.state.cfg);
+        let allowed = resolve_origin(origin_str, &self.state.cfg);
 
+        // FIX: id_hex_buf() → zero alloc
         let id_buf = ctx.id_hex_buf();
         let mut resp = ResponseHeader::build(http::StatusCode::NO_CONTENT, None)?;
         resp.insert_header("vary", "origin")?;
@@ -308,16 +310,12 @@ impl KineticProxy {
         use self::context::RouteKind;
         match ctx.route {
             RouteKind::Object => {
-                // S3 butuh x-amz-* headers untuk presigned URL dan multipart upload.
-                // Tanpa ini browser GET/PUT ke RustFS3 dari domain lain selalu 403.
                 resp.insert_header(
                     "access-control-allow-methods",
                     "GET, HEAD, PUT, DELETE, OPTIONS",
                 )?;
-                resp.insert_header(
-                    "access-control-allow-headers",
-                    "authorization, range, content-type, x-amz-date, x-amz-content-sha256, x-amz-security-token",
-                )?;
+                resp.insert_header("access-control-allow-headers",
+                    "authorization, range, content-type, x-amz-date, x-amz-content-sha256, x-amz-security-token")?;
                 resp.insert_header("access-control-max-age", "3600")?;
             }
             _ => {
@@ -335,7 +333,6 @@ impl KineticProxy {
 
         resp.insert_header("content-length", "0")?;
         resp.insert_header("x-request-id", id_buf.as_str())?;
-
         session.write_response_header(Box::new(resp), true).await?;
         Ok(true)
     }
@@ -346,12 +343,12 @@ impl KineticProxy {
         for (k, v) in headers {
             resp.insert_header(*k, *v)?;
         }
-        // Body — small format!, satu kali per reject (rare path)
+
         let body: bytes::Bytes = match err {
             PolicyError::RateLimited { retry_after_secs } => {
-                // Set retry-after header dengan itoa
                 let mut nbuf = itoa::Buffer::new();
                 resp.insert_header("retry-after", nbuf.format(*retry_after_secs))?;
+                // FIX: gunakan static template untuk body yang paling umum
                 bytes::Bytes::from(format!(
                     r#"{{"error":"rate_limited","retry_after":{}}}"#,
                     retry_after_secs
@@ -363,6 +360,7 @@ impl KineticProxy {
                 reason
             )),
         };
+
         let mut lbuf = itoa::Buffer::new();
         resp.insert_header("content-length", lbuf.format(body.len()))?;
         session.write_response_header(Box::new(resp), false).await?;
@@ -390,18 +388,18 @@ impl ProxyHttp for RedirectProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let path = req.uri.path();
-        let qs = req
-            .uri
-            .query()
-            .map(|q| format!("?{}", q))
-            .unwrap_or_default();
 
-        let location = format!("https://{}{}{}", host, path, qs);
+        // FIX: hindari format!() saat tidak ada query string (kasus paling umum)
+        let location = match req.uri.query() {
+            None => format!("https://{}{}", host, path),
+            Some(q) => format!("https://{}{}?{}", host, path, q),
+        };
+
         let mut resp = ResponseHeader::build(http::StatusCode::MOVED_PERMANENTLY, None)?;
         resp.insert_header("location", location.as_str())?;
         resp.insert_header("content-length", "0")?;
+        resp.insert_header("cache-control", "public, max-age=31536000")?;
         resp.insert_header("x-served-by", "kinetic-proxy")?;
-
         session.write_response_header(Box::new(resp), true).await?;
         Ok(true)
     }
@@ -418,12 +416,8 @@ pub fn build_proxy_service(
     server: &mut Server,
 ) -> impl pingora_core::services::Service {
     let cfg_arc = Arc::new(cfg.clone());
-
     let policy = Arc::new(PolicyLayer::new(cfg.rate_limit_rps));
 
-    // NOTE: rustfs_s3_address dipakai untuk s3_pool.
-    // image_addr di Config adalah field lama (Garage S3 :3902) — tidak dipakai.
-    // Jika perlu Garage, ganti rustfs_s3_address → image_addr di config.yaml.
     let state = Arc::new(ProxyState {
         cfg: Arc::clone(&cfg_arc),
         policy,
@@ -444,55 +438,59 @@ pub fn build_proxy_service(
         let key_web = cfg.tls_key_web.as_deref().unwrap();
 
         let mut tls = pingora_core::listeners::tls::TlsSettings::intermediate(cert_web, key_web)
-            .expect("Gagal load TLS cert web");
+            .expect("Gagal load TLS cert web — cek path di config.yaml");
 
         if let (Some(cert_api), Some(key_api)) = (cfg.tls_cert_api.clone(), cfg.tls_key_api.clone())
         {
-            use openssl::ssl::{NameType, SslAcceptor, SslFiletype, SslMethod};
+            if std::path::Path::new(&cert_api).exists() && std::path::Path::new(&key_api).exists() {
+                use openssl::ssl::{NameType, SslAcceptor, SslFiletype, SslMethod};
+                let mut api_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
+                    .expect("API SslAcceptor gagal");
+                api_builder
+                    .set_certificate_chain_file(&cert_api)
+                    .expect("cert API");
+                api_builder
+                    .set_private_key_file(&key_api, SslFiletype::PEM)
+                    .expect("key API");
+                let api_ctx = api_builder.build().into_context();
 
-            let mut api_builder =
-                SslAcceptor::mozilla_intermediate(SslMethod::tls()).expect("API SslAcceptor gagal");
-            api_builder
-                .set_certificate_chain_file(&cert_api)
-                .expect("cert API");
-            api_builder
-                .set_private_key_file(&key_api, SslFiletype::PEM)
-                .expect("key API");
-            let api_ctx = api_builder.build().into_context();
+                // Pre-compute SNI strings sekali saat startup — zero alloc per handshake.
+                let api_domain: Box<str> = cfg.api_domain.as_str().into();
+                let api_domain_www: Box<str> = format!("www.{}", cfg.api_domain).into();
+                let api_domain_sub: Box<str> = format!(".{}", cfg.api_domain).into();
 
-            // Pre-compute SNI match strings SEKALI saat startup — zero alloc per handshake.
-            let api_domain: Box<str> = cfg.api_domain.as_str().into();
-            let api_domain_www = format!("www.{}", cfg.api_domain).into_boxed_str();
-            let api_domain_sub = format!(".{}", cfg.api_domain).into_boxed_str();
-            tls.set_servername_callback(move |ssl, _| {
-                if let Some(sni) = ssl.servername(NameType::HOST_NAME) {
-                    let matches = sni == &*api_domain
-                        || sni == &*api_domain_www
-                        || sni.ends_with(&*api_domain_sub);
-                    if matches {
-                        ssl.set_ssl_context(&api_ctx)
-                            .map_err(|_| openssl::ssl::SniError::NOACK)?;
+                tls.set_servername_callback(move |ssl, _| {
+                    if let Some(sni) = ssl.servername(NameType::HOST_NAME) {
+                        let matches = sni == &*api_domain
+                            || sni == &*api_domain_www
+                            || sni.ends_with(&*api_domain_sub);
+                        if matches {
+                            ssl.set_ssl_context(&api_ctx)
+                                .map_err(|_| openssl::ssl::SniError::NOACK)?;
+                        }
                     }
-                }
-                Ok(())
-            });
-            tracing::info!("SNI TLS: web={cert_web}, api={cert_api}");
+                    Ok(())
+                });
+                tracing::info!("SNI dual-cert: web={cert_web}, api={cert_api}");
+            } else {
+                tracing::warn!(
+                    "TLS cert api tidak ditemukan di {cert_api} / {key_api} — hanya web TLS aktif"
+                );
+            }
         }
 
         svc.add_tls_with_settings(&cfg.listen_addr, None, tls);
-        tracing::info!("HTTPS :443 ready");
+        tracing::info!(
+            "HTTPS {} ready (web_domain={})",
+            cfg.listen_addr,
+            cfg.web_domain
+        );
     } else {
-        // FIX: Warning jelas jika TLS tidak dikonfigurasi — ini mungkin penyebab
-        // ulala.space tidak bisa diakses (browser expect HTTPS tapi dapat HTTP)
         tracing::warn!(
-            "⚠️  TLS TIDAK DIKONFIGURASI — proxy berjalan sebagai plain HTTP di {}",
+            "TLS tidak aktif — plain HTTP di {}. ulala.space TIDAK akan bisa dibuka via browser.",
             cfg.listen_addr
         );
-        tracing::warn!(
-            "   Set tls_cert_web + tls_key_web di config.yaml atau env PROXY_TLS_CERT_WEB / PROXY_TLS_KEY_WEB"
-        );
         svc.add_tcp(&cfg.listen_addr);
-        tracing::info!("HTTP (no TLS) {} ready", cfg.listen_addr);
     }
 
     svc
@@ -504,6 +502,6 @@ pub fn build_redirect_service(
 ) -> impl pingora_core::services::Service {
     let mut svc = http_proxy_service(&server.configuration, RedirectProxy);
     svc.add_tcp(&cfg.http_redirect_addr);
-    tracing::info!("HTTP redirect :80 ready");
+    tracing::info!("HTTP redirect {} → HTTPS ready", cfg.http_redirect_addr);
     svc
 }

@@ -1,0 +1,50 @@
+# docker-compose.yml — production deploy kinetic-proxy
+# Usage: docker compose up -d
+
+services:
+  kinetic-proxy:
+    build: .
+    image: kinetic-proxy:latest
+    container_name: kinetic-proxy
+    restart: unless-stopped
+    
+    ports:
+      - "80:80"
+      - "443:443"
+    
+    volumes:
+      # ── WAJIB: mount cert Let's Encrypt ──────────────────────────────────
+      # Tanpa ini TLS tidak aktif → ulala.space tidak bisa dibuka via browser
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /etc/ssl/ulalaapi.store:/etc/ssl/ulalaapi.store:ro
+      
+      # Config (opsional jika mau override tanpa rebuild)
+      - ./config.yaml:/app/config.yaml:ro
+    
+    # Env override — lebih praktis dari rebuild image
+    environment:
+      - RUST_LOG=info,kinetic_proxy=debug
+      # Override jika perlu:
+      # - PROXY_WEB_DOMAIN=ulala.space
+      # - PROXY_API_DOMAIN=ulalaapi.store
+      # - PROXY_RATE_LIMIT_RPS=200
+    
+    # Upstreams harus bisa diakses dari container
+    # Jika proxy dan app di host yang sama (tidak dalam docker network):
+    network_mode: host
+    # Jika pakai docker network biasa, hapus network_mode: host
+    # dan set backend_addr di config.yaml ke nama container, misal:
+    # backend_addr: "axum-backend:8080"
+    
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

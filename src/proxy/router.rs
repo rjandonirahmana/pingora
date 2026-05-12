@@ -51,30 +51,30 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
     // ── 1. Frontend (ulala.space / www.ulala.space) ───────────────────────────
     if is_web_domain(host, cfg) {
         return RouteDecision {
-            upstream:     Upstream::Frontend,
+            upstream: Upstream::Frontend,
             strip_prefix: None,
-            is_ws:        false,
-            is_static:    is_static_path(path),
+            is_ws: false,
+            is_static: is_static_path(path),
         };
     }
 
     // ── 2. Object storage via subdomain (image.ulalaapi.store) ───────────────
     if host == cfg.image_subdomain.as_str() {
         return RouteDecision {
-            upstream:     Upstream::RustFS3,
-            strip_prefix: None,   // path langsung ke S3, tidak di-strip
-            is_ws:        false,
-            is_static:    false,
+            upstream: Upstream::RustFS3,
+            strip_prefix: None, // path langsung ke S3, tidak di-strip
+            is_ws: false,
+            is_static: false,
         };
     }
 
     // ── 3. Storage console via subdomain (ui.ulalaapi.store) ─────────────────
     if host == cfg.ui_subdomain.as_str() {
         return RouteDecision {
-            upstream:     Upstream::RustFSUI,
+            upstream: Upstream::RustFSUI,
             strip_prefix: None,
-            is_ws:        false,
-            is_static:    false,
+            is_ws: false,
+            is_static: false,
         };
     }
 
@@ -83,48 +83,48 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
         // 4. /image/* → S3 (backward compat, strip "/image" prefix)
         if path.starts_with("/image/") || path == "/image" {
             return RouteDecision {
-                upstream:     Upstream::RustFS3,
+                upstream: Upstream::RustFS3,
                 strip_prefix: Some("/image"),
-                is_ws:        false,
-                is_static:    false,
+                is_ws: false,
+                is_static: false,
             };
         }
 
         // 5. WebSocket
         if is_ws_path(path) {
             return RouteDecision {
-                upstream:     Upstream::Backend,
+                upstream: Upstream::Backend,
                 strip_prefix: None,
-                is_ws:        true,
-                is_static:    false,
+                is_ws: true,
+                is_static: false,
             };
         }
 
         // 6. REST API
         if path.starts_with("/api/") || path == "/api" {
             return RouteDecision {
-                upstream:     Upstream::Backend,
+                upstream: Upstream::Backend,
                 strip_prefix: None,
-                is_ws:        false,
-                is_static:    false,
+                is_ws: false,
+                is_static: false,
             };
         }
 
         // 7. Fallback api domain
         return RouteDecision {
-            upstream:     Upstream::Backend,
+            upstream: Upstream::Backend,
             strip_prefix: None,
-            is_ws:        false,
-            is_static:    false,
+            is_ws: false,
+            is_static: false,
         };
     }
 
     // ── 8. Fallback global ────────────────────────────────────────────────────
     RouteDecision {
-        upstream:     Upstream::Frontend,
+        upstream: Upstream::Frontend,
         strip_prefix: None,
-        is_ws:        false,
-        is_static:    is_static_path(path),
+        is_ws: false,
+        is_static: is_static_path(path),
     }
 }
 
@@ -184,10 +184,10 @@ mod tests {
 
     fn cfg() -> Config {
         Config {
-            web_domain:       "ulala.space".into(),
-            api_domain:       "ulalaapi.store".into(),
-            image_subdomain:  "image.ulalaapi.store".into(),
-            ui_subdomain:     "ui.ulalaapi.store".into(),
+            web_domain: "ulala.space".into(),
+            api_domain: "ulalaapi.store".into(),
+            image_subdomain: "image.ulalaapi.store".into(),
+            ui_subdomain: "ui.ulalaapi.store".into(),
             ..Config::default()
         }
     }
@@ -195,17 +195,23 @@ mod tests {
     #[test]
     fn frontend_routes() {
         let c = cfg();
-        assert_eq!(route("ulala.space",      "/",               &c).upstream, Upstream::Frontend);
-        assert_eq!(route("www.ulala.space",  "/events/slug",    &c).upstream, Upstream::Frontend);
-        assert_eq!(route("ulala.space:443",  "/static/app.js",  &c).upstream, Upstream::Frontend);
-        assert!(route("ulala.space",         "/static/app.js",  &c).is_static);
+        assert_eq!(route("ulala.space", "/", &c).upstream, Upstream::Frontend);
+        assert_eq!(
+            route("www.ulala.space", "/events/slug", &c).upstream,
+            Upstream::Frontend
+        );
+        assert_eq!(
+            route("ulala.space:443", "/static/app.js", &c).upstream,
+            Upstream::Frontend
+        );
+        assert!(route("ulala.space", "/static/app.js", &c).is_static);
     }
 
     #[test]
     fn subdomain_routes() {
         let c = cfg();
         let img = route("image.ulalaapi.store", "/bucket/photo.jpg", &c);
-        assert_eq!(img.upstream,     Upstream::RustFS3);
+        assert_eq!(img.upstream, Upstream::RustFS3);
         assert!(img.strip_prefix.is_none(), "subdomain tidak boleh strip");
 
         let ui = route("ui.ulalaapi.store", "/dashboard", &c);
@@ -216,7 +222,7 @@ mod tests {
     fn api_domain_image_strip() {
         let c = cfg();
         let d = route("ulalaapi.store", "/image/photo.jpg", &c);
-        assert_eq!(d.upstream,     Upstream::RustFS3);
+        assert_eq!(d.upstream, Upstream::RustFS3);
         assert_eq!(d.strip_prefix, Some("/image"));
     }
 
@@ -244,7 +250,7 @@ mod tests {
             let a = route("ulalaapi.store", "/api/events", &c);
             let b = route("ulalaapi.store", "/api/events", &c);
             assert_eq!(a.upstream, b.upstream);
-            assert_eq!(a.is_ws,    b.is_ws);
+            assert_eq!(a.is_ws, b.is_ws);
         }
     }
 }

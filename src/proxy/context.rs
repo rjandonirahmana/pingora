@@ -39,11 +39,11 @@ pub enum RouteKind {
 impl RouteKind {
     pub fn from_decision(decision: &RouteDecision) -> Self {
         match decision.upstream {
-            Upstream::Backend  if decision.is_ws => RouteKind::Websocket,
-            Upstream::Backend                    => RouteKind::Api,
-            Upstream::Frontend                   => RouteKind::Static,
-            Upstream::RustFS3                    => RouteKind::Object,
-            Upstream::RustFSUI                   => RouteKind::Dashboard,
+            Upstream::Backend if decision.is_ws => RouteKind::Websocket,
+            Upstream::Backend => RouteKind::Api,
+            Upstream::Frontend => RouteKind::Static,
+            Upstream::RustFS3 => RouteKind::Object,
+            Upstream::RustFSUI => RouteKind::Dashboard,
         }
     }
 }
@@ -53,18 +53,38 @@ impl RouteKind {
 #[derive(Debug, Clone, Copy)]
 pub struct TimeoutConfig {
     pub connect_secs: u64,
-    pub read_secs:    u64,
-    pub write_secs:   u64,
+    pub read_secs: u64,
+    pub write_secs: u64,
 }
 
 impl TimeoutConfig {
     pub fn for_route(kind: RouteKind) -> Self {
         match kind {
-            RouteKind::Websocket => Self { connect_secs: 10, read_secs: 3600, write_secs: 3600 },
-            RouteKind::Api       => Self { connect_secs: 5,  read_secs: 60,   write_secs: 30   },
-            RouteKind::Object    => Self { connect_secs: 5,  read_secs: 120,  write_secs: 120  },
-            RouteKind::Static    => Self { connect_secs: 3,  read_secs: 30,   write_secs: 10   },
-            RouteKind::Dashboard => Self { connect_secs: 5,  read_secs: 60,   write_secs: 30   },
+            RouteKind::Websocket => Self {
+                connect_secs: 10,
+                read_secs: 3600,
+                write_secs: 3600,
+            },
+            RouteKind::Api => Self {
+                connect_secs: 5,
+                read_secs: 60,
+                write_secs: 30,
+            },
+            RouteKind::Object => Self {
+                connect_secs: 5,
+                read_secs: 120,
+                write_secs: 120,
+            },
+            RouteKind::Static => Self {
+                connect_secs: 3,
+                read_secs: 30,
+                write_secs: 10,
+            },
+            RouteKind::Dashboard => Self {
+                connect_secs: 5,
+                read_secs: 60,
+                write_secs: 30,
+            },
         }
     }
 }
@@ -85,50 +105,50 @@ impl HexBuf {
 
 pub struct RequestCtx {
     // Identity
-    pub id:           u64,
-    pub started_at:   Instant,
+    pub id: u64,
+    pub started_at: Instant,
 
     // Routing
-    pub upstream:     Upstream,
-    pub route:        RouteKind,
-    pub timeout:      TimeoutConfig,
+    pub upstream: Upstream,
+    pub route: RouteKind,
+    pub timeout: TimeoutConfig,
 
     // Request info — host & path harus String (owned untuk lifetime independence)
-    pub host:         String,
-    pub path:         String,
-    pub method:       Method,
+    pub host: String,
+    pub path: String,
+    pub method: Method,
 
     // Flags
-    pub is_ws:        bool,
-    pub is_static:    bool,
-    pub is_api:       bool,
-    pub is_object:    bool,
+    pub is_ws: bool,
+    pub is_static: bool,
+    pub is_api: bool,
+    pub is_object: bool,
 
     // Transform
     pub strip_prefix: Option<&'static str>,
 
     // Client info
-    pub client_ip:     Option<IpAddr>,
+    pub client_ip: Option<IpAddr>,
     // SmolStr: stack-allocated jika ≤ 22 bytes (cukup untuk semua IPv4 "255.255.255.255:65535"
     // dan IPv6 "::1" dll). Tidak ada heap alloc untuk kasus umum.
     pub client_ip_str: SmolStr,
 
     // Backend addr yang terpilih — SmolStr: "127.0.0.1:8080" = 14 bytes, fits on stack.
-    pub backend_addr:  SmolStr,
+    pub backend_addr: SmolStr,
 
     // Retry counter
-    pub attempts:      u8,
+    pub attempts: u8,
 }
 
 impl RequestCtx {
     pub fn new(
-        decision:  RouteDecision,
-        host:      String,
-        path:      String,
-        method:    Method,
+        decision: RouteDecision,
+        host: String,
+        path: String,
+        method: Method,
         client_ip: Option<IpAddr>,
     ) -> Self {
-        let route   = RouteKind::from_decision(&decision);
+        let route = RouteKind::from_decision(&decision);
         let timeout = TimeoutConfig::for_route(route);
 
         // SmolStr::new() — stack jika ≤ 22 chars (true untuk semua IP string)
@@ -137,23 +157,23 @@ impl RequestCtx {
             .unwrap_or_default();
 
         Self {
-            id:           next_id(),
-            started_at:   Instant::now(),
-            upstream:     decision.upstream,
+            id: next_id(),
+            started_at: Instant::now(),
+            upstream: decision.upstream,
             route,
             timeout,
             host,
             path,
             method,
-            is_ws:        decision.is_ws,
-            is_static:    matches!(route, RouteKind::Static),
-            is_api:       matches!(route, RouteKind::Api | RouteKind::Websocket),
-            is_object:    matches!(route, RouteKind::Object),
+            is_ws: decision.is_ws,
+            is_static: matches!(route, RouteKind::Static),
+            is_api: matches!(route, RouteKind::Api | RouteKind::Websocket),
+            is_object: matches!(route, RouteKind::Object),
             strip_prefix: decision.strip_prefix,
             client_ip,
             client_ip_str,
             backend_addr: SmolStr::default(), // diisi di upstream_peer
-            attempts:     0,
+            attempts: 0,
         }
     }
 
@@ -172,7 +192,7 @@ impl RequestCtx {
         const HEX: &[u8] = b"0123456789abcdef";
         for i in 0..8 {
             let byte = ((id >> ((7 - i) * 8)) & 0xff) as u8;
-            buf[i * 2]     = HEX[(byte >> 4) as usize];
+            buf[i * 2] = HEX[(byte >> 4) as usize];
             buf[i * 2 + 1] = HEX[(byte & 0xf) as usize];
         }
         HexBuf(buf)
@@ -196,23 +216,23 @@ impl RequestCtx {
 impl Default for RequestCtx {
     fn default() -> Self {
         Self {
-            id:            0,
-            started_at:    Instant::now(),
-            upstream:      Upstream::Frontend,
-            route:         RouteKind::Static,
-            timeout:       TimeoutConfig::for_route(RouteKind::Static),
-            host:          String::new(),
-            path:          String::new(),
-            method:        Method::GET,
-            is_ws:         false,
-            is_static:     true,
-            is_api:        false,
-            is_object:     false,
-            strip_prefix:  None,
-            client_ip:     None,
+            id: 0,
+            started_at: Instant::now(),
+            upstream: Upstream::Frontend,
+            route: RouteKind::Static,
+            timeout: TimeoutConfig::for_route(RouteKind::Static),
+            host: String::new(),
+            path: String::new(),
+            method: Method::GET,
+            is_ws: false,
+            is_static: true,
+            is_api: false,
+            is_object: false,
+            strip_prefix: None,
+            client_ip: None,
             client_ip_str: SmolStr::default(),
-            backend_addr:  SmolStr::default(),
-            attempts:      0,
+            backend_addr: SmolStr::default(),
+            attempts: 0,
         }
     }
 }
