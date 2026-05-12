@@ -12,8 +12,8 @@ web_domain: "ulala.space" # SPA Leptos
 api_domain: "ulalaapi.store" # REST + WS + Image
 
 # ── Upstream services ─────────────────────────────────────────────────────────
-frontend_addr: "127.0.0.1:6188"
-backend_addr:  "127.0.0.1:6189"
+backend_addr: "127.0.0.1:8080" # Axum REST + WebSocket
+frontend_addr: "127.0.0.1:3100" # static-web-server (Leptos SPA)
 image_addr: "127.0.0.1:3902" # Garage S3 web UI
 rustfs_ui_address: "127.0.0.1:9001"
 rustfs_s3_address: "127.0.0.1:9000"
