@@ -11,6 +11,7 @@
 pub mod context;
 pub mod policy;
 pub mod router;
+pub mod static_serve;
 pub mod transform;
 pub mod upstream_pool;
 
@@ -28,6 +29,7 @@ use pingora_proxy::{http_proxy_service, ProxyHttp, Session};
 use smol_str::SmolStr;
 
 use crate::config::Config;
+use crate::proxy::static_serve::StaticServe;
 use crate::upstream::Upstream;
 
 use self::context::RequestCtx;
@@ -44,6 +46,7 @@ pub struct ProxyState {
     pub frontend_pool: Arc<UpstreamPool>,
     pub s3_pool: Arc<UpstreamPool>,
     pub ui_pool: Arc<UpstreamPool>,
+    pub frontend_static: Option<Arc<StaticServe>>,
 }
 
 impl ProxyState {
@@ -142,6 +145,14 @@ impl ProxyHttp for KineticProxy {
             route    = ?ctx.route,
             ws       = ctx.is_ws,
         );
+
+        if ctx.upstream == Upstream::Frontend {
+            if let Some(ref static_srv) = self.state.frontend_static {
+                if static_srv.serve(session, &ctx.path).await? {
+                    return Ok(true); // request selesai, tidak perlu upstream
+                }
+            }
+        }
 
         // Preflight CORS — handle untuk api DAN object storage.
         if method == http::Method::OPTIONS && (ctx.is_api || ctx.is_object) {
@@ -425,6 +436,10 @@ pub fn build_proxy_service(
         frontend_pool: Arc::new(UpstreamPool::single(cfg.frontend_addr.clone())),
         s3_pool: Arc::new(UpstreamPool::single(cfg.rustfs_s3_address.clone())),
         ui_pool: Arc::new(UpstreamPool::single(cfg.rustfs_ui_address.clone())),
+        frontend_static: cfg
+            .frontend_dist_path
+            .as_ref()
+            .map(|p| Arc::new(StaticServe::new(p))),
     });
 
     let proxy = KineticProxy {

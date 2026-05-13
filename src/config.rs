@@ -76,6 +76,9 @@ pub struct Config {
 
     #[serde(default = "default_ui_subdomain")]
     pub ui_subdomain: String,
+
+    #[serde(default)]
+    pub frontend_dist_path: Option<String>,
 }
 
 impl Config {
@@ -211,6 +214,7 @@ impl Default for Config {
             rustfs_ui_address: default_rustfs_ui(),
             image_subdomain: default_image_subdomain(),
             ui_subdomain: default_ui_subdomain(),
+            frontend_dist_path: None,
         }
     }
 }

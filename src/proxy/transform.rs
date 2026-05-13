@@ -185,7 +185,7 @@ pub fn apply_response(
     apply_cors(upstream_resp, ctx, cfg, origin)?;
     apply_cache(upstream_resp, ctx, cfg)?;
 
-    if ctx.is_object {
+    if ctx.is_static || ctx.is_object {
         if let Some(mime) = mime_from_path(&ctx.path) {
             upstream_resp.insert_header("content-type", mime)?;
         }
