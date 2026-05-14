@@ -334,7 +334,10 @@ impl KineticProxy {
         let mut resp = ResponseHeader::build(http::StatusCode::NO_CONTENT, None)?;
         resp.insert_header("vary", "origin")?;
         resp.insert_header("access-control-allow-origin", allowed)?;
-        resp.insert_header("access-control-allow-credentials", "true")?;
+        // REVIEW FIX: jangan set credentials kalau wildcard (sama seperti apply_cors)
+        if allowed != "*" {
+            resp.insert_header("access-control-allow-credentials", "true")?;
+        }
 
         use self::context::RouteKind;
         match ctx.route {

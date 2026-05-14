@@ -130,10 +130,13 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
 
 // ─── Helpers (inline, zero alloc) ────────────────────────────────────────────
 
-/// Strip port dari host header: "ulala.space:443" → "ulala.space"
+/// Strip port dari host header, handle IPv6 dengan benar.
+///
+/// REVIEW FIX: split(':') pecah IPv6 literal "[::1]:8080" → "[" (salah).
+/// Delegasi ke transform::strip_port() yang handle bracket notation.
 #[inline]
 fn bare_host(host: &str) -> &str {
-    host.split(':').next().unwrap_or(host)
+    crate::proxy::transform::strip_port(host)
 }
 
 #[inline]

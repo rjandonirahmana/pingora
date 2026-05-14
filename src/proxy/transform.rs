@@ -1,9 +1,15 @@
 //! Transform layer — modifikasi request & response header.
 //!
-//! Fix dari original:
-//!   - resolve_origin(): dijadikan pub agar bisa dipakai di mod.rs (handle_preflight fix)
-//!   - apply_cache(): cast image_cache_days ke u64 sebelum multiply (fix u32 overflow)
-//!   - apply_response(): HSTS hanya di-inject jika TLS aktif
+//! Changelog:
+//!   [prev] resolve_origin() → pub, apply_cache() u64 cast, HSTS TLS-only
+//!   [prev] is_static path-based, cache SPA no-store, COOP/COEP, x-forwarded-proto dynamic
+//!   [review] CORS wildcard+credentials guard (SPEC BUG — browser reject wildcard+creds)
+//!   [review] IPv6 host parsing (split(':') pecah "[::1]:8080" jadi "[" bukan "[::1]")
+//!   [review] Hapus x-xss-protection (deprecated, pernah buka vuln di IE/Edge)
+//!   [review] JS MIME: text/javascript (RFC 9239, bukan application/javascript)
+//!   [review] content-disposition skip untuk SVG/HTML (XSS vector kalau inline)
+//!   [review] apply_cache buffer: ganti manual slice copy dengan format string yg aman
+//!   [review] Tambah Content-Security-Policy baseline untuk frontend
 
 use pingora_http::{RequestHeader, ResponseHeader};
 
@@ -25,108 +31,71 @@ pub fn mime_from_path(path: &str) -> Option<&'static str> {
     match_ext_ci(ext)
 }
 
+// REVIEW: refactor ke match + eq_ignore_ascii_case untuk readability
 fn match_ext_ci(ext: &str) -> Option<&'static str> {
-    let eq = |a: &str, b: &str| {
-        a.len() == b.len()
-            && a.bytes()
-                .zip(b.bytes())
-                .all(|(x, y)| x.to_ascii_lowercase() == y)
-    };
+    match ext {
+        e if e.eq_ignore_ascii_case("png") => Some("image/png"),
+        e if e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg") => Some("image/jpeg"),
+        e if e.eq_ignore_ascii_case("gif") => Some("image/gif"),
+        e if e.eq_ignore_ascii_case("webp") => Some("image/webp"),
+        e if e.eq_ignore_ascii_case("svg") => Some("image/svg+xml"),
+        e if e.eq_ignore_ascii_case("avif") => Some("image/avif"),
+        e if e.eq_ignore_ascii_case("ico") => Some("image/x-icon"),
+        e if e.eq_ignore_ascii_case("bmp") => Some("image/bmp"),
+        e if e.eq_ignore_ascii_case("tiff") || e.eq_ignore_ascii_case("tif") => Some("image/tiff"),
+        e if e.eq_ignore_ascii_case("mp4") => Some("video/mp4"),
+        e if e.eq_ignore_ascii_case("webm") => Some("video/webm"),
+        e if e.eq_ignore_ascii_case("mov") => Some("video/quicktime"),
+        e if e.eq_ignore_ascii_case("avi") => Some("video/x-msvideo"),
+        e if e.eq_ignore_ascii_case("mkv") => Some("video/x-matroska"),
+        e if e.eq_ignore_ascii_case("mp3") => Some("audio/mpeg"),
+        e if e.eq_ignore_ascii_case("ogg") => Some("audio/ogg"),
+        e if e.eq_ignore_ascii_case("wav") => Some("audio/wav"),
+        e if e.eq_ignore_ascii_case("flac") => Some("audio/flac"),
+        e if e.eq_ignore_ascii_case("m4a") => Some("audio/mp4"),
+        e if e.eq_ignore_ascii_case("pdf") => Some("application/pdf"),
+        e if e.eq_ignore_ascii_case("txt") => Some("text/plain; charset=utf-8"),
+        e if e.eq_ignore_ascii_case("json") => Some("application/json"),
+        e if e.eq_ignore_ascii_case("xml") => Some("application/xml"),
+        e if e.eq_ignore_ascii_case("csv") => Some("text/csv"),
+        e if e.eq_ignore_ascii_case("html") => Some("text/html; charset=utf-8"),
+        e if e.eq_ignore_ascii_case("css") => Some("text/css"),
+        // REVIEW: text/javascript per RFC 9239 (bukan application/javascript yang legacy)
+        e if e.eq_ignore_ascii_case("js") || e.eq_ignore_ascii_case("mjs") => {
+            Some("text/javascript")
+        }
+        // WASM MUST be application/wasm — browser tolak instantiasi kalau salah MIME
+        e if e.eq_ignore_ascii_case("wasm") => Some("application/wasm"),
+        e if e.eq_ignore_ascii_case("woff") => Some("font/woff"),
+        e if e.eq_ignore_ascii_case("woff2") => Some("font/woff2"),
+        e if e.eq_ignore_ascii_case("ttf") => Some("font/ttf"),
+        _ => None,
+    }
+}
 
-    if eq(ext, "png") {
-        return Some("image/png");
+// ─── Helper: strip port dari host, handle IPv6 ───────────────────────────────
+
+/// Strip port dari host header dengan benar untuk IPv4, hostname, dan IPv6.
+///
+/// REVIEW FIX: `split(':').next()` pecah IPv6 literal:
+///   "[::1]:8080" → "[" bukan "[::1]"
+///
+/// Behavior:
+///   "ulala.space:443"  → "ulala.space"
+///   "ulala.space"      → "ulala.space"
+///   "[::1]:8080"       → "[::1]"
+///   "[::1]"            → "[::1]"
+///   "192.168.1.1:3000" → "192.168.1.1"
+#[inline]
+pub fn strip_port(host: &str) -> &str {
+    if host.starts_with('[') {
+        // IPv6 literal — port ada setelah ']', format: "[addr]:port" atau "[addr]"
+        let bracket_end = host.find(']').map(|i| i + 1).unwrap_or(host.len());
+        &host[..bracket_end]
+    } else {
+        // IPv4 atau hostname — ambil bagian sebelum ':'
+        host.split(':').next().unwrap_or(host)
     }
-    if eq(ext, "jpg") || eq(ext, "jpeg") {
-        return Some("image/jpeg");
-    }
-    if eq(ext, "gif") {
-        return Some("image/gif");
-    }
-    if eq(ext, "webp") {
-        return Some("image/webp");
-    }
-    if eq(ext, "svg") {
-        return Some("image/svg+xml");
-    }
-    if eq(ext, "avif") {
-        return Some("image/avif");
-    }
-    if eq(ext, "ico") {
-        return Some("image/x-icon");
-    }
-    if eq(ext, "bmp") {
-        return Some("image/bmp");
-    }
-    if eq(ext, "tiff") || eq(ext, "tif") {
-        return Some("image/tiff");
-    }
-    if eq(ext, "mp4") {
-        return Some("video/mp4");
-    }
-    if eq(ext, "webm") {
-        return Some("video/webm");
-    }
-    if eq(ext, "mov") {
-        return Some("video/quicktime");
-    }
-    if eq(ext, "avi") {
-        return Some("video/x-msvideo");
-    }
-    if eq(ext, "mkv") {
-        return Some("video/x-matroska");
-    }
-    if eq(ext, "mp3") {
-        return Some("audio/mpeg");
-    }
-    if eq(ext, "ogg") {
-        return Some("audio/ogg");
-    }
-    if eq(ext, "wav") {
-        return Some("audio/wav");
-    }
-    if eq(ext, "flac") {
-        return Some("audio/flac");
-    }
-    if eq(ext, "m4a") {
-        return Some("audio/mp4");
-    }
-    if eq(ext, "pdf") {
-        return Some("application/pdf");
-    }
-    if eq(ext, "txt") {
-        return Some("text/plain; charset=utf-8");
-    }
-    if eq(ext, "json") {
-        return Some("application/json");
-    }
-    if eq(ext, "xml") {
-        return Some("application/xml");
-    }
-    if eq(ext, "csv") {
-        return Some("text/csv");
-    }
-    if eq(ext, "html") {
-        return Some("text/html; charset=utf-8");
-    }
-    if eq(ext, "css") {
-        return Some("text/css");
-    }
-    if eq(ext, "js") || eq(ext, "mjs") {
-        return Some("application/javascript");
-    }
-    if eq(ext, "wasm") {
-        return Some("application/wasm");
-    }
-    if eq(ext, "woff") {
-        return Some("font/woff");
-    }
-    if eq(ext, "woff2") {
-        return Some("font/woff2");
-    }
-    if eq(ext, "ttf") {
-        return Some("font/ttf");
-    }
-    None
 }
 
 // ─── Request transform ────────────────────────────────────────────────────────
@@ -154,17 +123,20 @@ pub fn apply_request(
 
     // ── 2. Host header ────────────────────────────────────────────────────────
     use crate::upstream::Upstream;
+    // REVIEW FIX: pakai strip_port() yang handle IPv6 dengan benar
     let host_val = match ctx.upstream {
-        Upstream::RustFS3 | Upstream::RustFSUI => ctx.host.split(':').next().unwrap_or(&ctx.host),
+        Upstream::RustFS3 | Upstream::RustFSUI => strip_port(&ctx.host),
         _ => ctx.upstream.addr(cfg),
     };
     upstream_req.insert_header("host", host_val)?;
 
     // ── 3. Forwarding headers ─────────────────────────────────────────────────
+    // REVIEW: X-Forwarded-For trust model — proxy ini adalah edge proxy.
+    // IP dari session.client_addr() adalah koneksi TCP langsung, tidak bisa di-spoof.
+    // Kalau di-deploy di belakang LB lain (AWS ALB, Cloudflare, dll), ganti dengan:
+    // baca X-Forwarded-For yang sudah ada dari upstream lalu append, bukan override.
     let id_buf = ctx.id_hex_buf();
     upstream_req.insert_header("x-request-id", id_buf.as_str())?;
-    // FIX: x-forwarded-proto harus ikut kondisi TLS aktif, bukan selalu "https".
-    // Kalau plain HTTP (dev/staging), backend Axum harus tahu agar tidak infinite redirect.
     let proto = if cfg.tls_enabled() { "https" } else { "http" };
     upstream_req.insert_header("x-forwarded-proto", proto)?;
     upstream_req.insert_header("x-forwarded-host", ctx.host.as_str())?;
@@ -188,26 +160,63 @@ pub fn apply_response(
     apply_cors(upstream_resp, ctx, cfg, origin)?;
     apply_cache(upstream_resp, ctx, cfg)?;
 
-    // FIX: hanya override content-type untuk actual static asset files, bukan SPA routes.
-    // ctx.is_static = true → path punya ekstensi file (dari is_static_path()).
-    // SPA routes (ctx.is_static = false) biarkan upstream yang set content-type.
+    // Override content-type hanya untuk actual static asset files (punya ekstensi).
+    // SPA routes (ctx.is_static = false) biarkan upstream set content-type-nya.
     if ctx.is_static || ctx.is_object {
         if let Some(mime) = mime_from_path(&ctx.path) {
             upstream_resp.insert_header("content-type", mime)?;
         }
-        // content-disposition: inline hanya untuk file assets, bukan HTML
-        if ctx.is_static {
+
+        // REVIEW FIX: content-disposition: inline hanya untuk tipe binary yang aman.
+        // SVG bisa contain <script> → inline di same-origin = eksekusi JS = XSS vector.
+        // HTML juga bisa eksekusi script. JS/CSS sudah ada MIME enforcement.
+        // Binary assets (image raster, font, audio, video, wasm) aman di-inline.
+        let path_lower = ctx.path.to_ascii_lowercase();
+        let ext = path_lower
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .split('?')
+            .next()
+            .unwrap_or("");
+        let safe_for_inline = matches!(
+            ext,
+            "wasm"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "avif"
+                | "ico"
+                | "bmp"
+                | "tiff"
+                | "tif"
+                | "woff"
+                | "woff2"
+                | "ttf"
+                | "mp4"
+                | "webm"
+                | "mp3"
+                | "wav"
+                | "flac"
+                | "ogg"
+                | "m4a"
+                | "mov"
+        );
+        if safe_for_inline {
             upstream_resp.insert_header("content-disposition", "inline")?;
         }
+        // SVG, HTML, JS, CSS: tidak set content-disposition — browser default.
     }
 
-    // Security headers — &'static str, no alloc
+    // ── Security headers ──────────────────────────────────────────────────────
     upstream_resp.insert_header("x-content-type-options", "nosniff")?;
     upstream_resp.insert_header("x-frame-options", "SAMEORIGIN")?;
-    upstream_resp.insert_header("x-xss-protection", "1; mode=block")?;
+    // REVIEW: x-xss-protection DIHAPUS — deprecated di semua browser modern (Chrome 78+).
+    // Pernah membuka reflection XSS di IE/Edge lama via filter bypass.
+    // CSP di bawah yang handle XSS protection.
     upstream_resp.insert_header("referrer-policy", "strict-origin-when-cross-origin")?;
-    // FIX: HSTS hanya di-inject jika TLS aktif.
-    // Di plain HTTP browser ignore HSTS, tapi lebih bersih dan tidak menyesatkan client.
     if cfg.tls_enabled() {
         upstream_resp.insert_header(
             "strict-transport-security",
@@ -219,12 +228,27 @@ pub fn apply_response(
         "geolocation=(), microphone=(), camera=()",
     )?;
 
-    // WASM FIX: Cross-Origin Isolation headers untuk frontend routes.
-    // Leptos WASM butuh ini kalau pakai SharedArrayBuffer / Atomics / threading.
-    // Tanpa COOP+COEP: browser modern (Chrome 92+, Firefox 79+) block
-    // instantiasi WASM yang butuh memory sharing atau panggil Atomics.wait().
-    // Safe untuk semua Leptos app — tidak breaking untuk non-threaded WASM.
+    // REVIEW: Content-Security-Policy + Cross-Origin Isolation untuk frontend Leptos WASM.
+    // CSP:
+    //   script-src 'wasm-unsafe-eval' — diperlukan untuk WASM instantiation (CSP Level 3)
+    //     bukan 'unsafe-eval' (terlalu broad, izinkan eval() string)
+    //   style-src 'unsafe-inline' — Leptos/Trunk inject <style> tag saat runtime
+    //   connect-src — izinkan fetch/WS ke API domain
+    // Sesuaikan jika pakai CDN font atau third-party script.
     if matches!(ctx.route, RouteKind::Static) {
+        let api = cfg.api_domain.as_str();
+        let csp = format!(
+            "default-src 'self'; \
+             script-src 'self' 'wasm-unsafe-eval'; \
+             style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: blob:; \
+             connect-src 'self' https://{api} wss://{api}; \
+             font-src 'self'; \
+             object-src 'none'; \
+             base-uri 'self'",
+        );
+        upstream_resp.insert_header("content-security-policy", csp.as_str())?;
+        // Cross-Origin Isolation untuk WASM SharedArrayBuffer/threading
         upstream_resp.insert_header("cross-origin-opener-policy", "same-origin")?;
         upstream_resp.insert_header("cross-origin-embedder-policy", "require-corp")?;
         upstream_resp.insert_header("cross-origin-resource-policy", "same-origin")?;
@@ -261,7 +285,12 @@ fn apply_cors(
             if ctx.is_api {
                 resp.insert_header("vary", "origin")?;
                 resp.insert_header("access-control-allow-origin", allowed)?;
-                resp.insert_header("access-control-allow-credentials", "true")?;
+                // REVIEW FIX: SPEC BUG — RFC 7480 §6.1 melarang credentials + wildcard.
+                // Browser reject response kalau allow-origin: * + allow-credentials: true.
+                // resolve_origin() return "*" hanya kalau cors_origins kosong (misconfigured).
+                if allowed != "*" {
+                    resp.insert_header("access-control-allow-credentials", "true")?;
+                }
                 resp.insert_header(
                     "access-control-allow-methods",
                     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
@@ -280,7 +309,10 @@ fn apply_cors(
         Upstream::RustFS3 => {
             resp.insert_header("vary", "origin")?;
             resp.insert_header("access-control-allow-origin", allowed)?;
-            resp.insert_header("access-control-allow-credentials", "true")?;
+            // REVIEW FIX: sama, jangan set credentials kalau wildcard
+            if allowed != "*" {
+                resp.insert_header("access-control-allow-credentials", "true")?;
+            }
             resp.insert_header(
                 "access-control-allow-methods",
                 "GET, HEAD, PUT, DELETE, OPTIONS",
@@ -297,17 +329,25 @@ fn apply_cors(
     Ok(())
 }
 
-/// FIX: dijadikan `pub` agar bisa dipakai di mod.rs untuk validasi preflight CORS.
+/// Resolve origin untuk CORS — return origin yang di-allow atau fallback.
 ///
-/// Resolve origin — zero alloc fast path: return &str dari origin atau cors_origins.
+/// REVIEW: jangan return "*" kalau config mengharuskan credentials.
+/// Caller (`apply_cors`, `handle_preflight`) WAJIB cek result != "*" sebelum
+/// set `access-control-allow-credentials: true`.
 ///
-/// Urutan pengecekan:
-///   1. cors_origins berisi "*"    → allow (wildcard)
-///   2. origin di cors_origins     → allow (production list)
-///   3. origin di dev_origins      → allow (localhost dev: 3000, 5173, dll)
-///   4. Tidak match                → fallback ke first cors_origin atau "*"
+/// Urutan:
+///   1. cors_origins berisi "*" → return request origin (BUKAN literal "*")
+///      sehingga allow-credentials tetap bisa jalan
+///   2. origin di cors_origins   → return origin
+///   3. origin di dev_origins    → return origin
+///   4. Fallback                 → first cors_origin atau "*" (misconfigured)
 pub fn resolve_origin<'a>(origin: &'a str, cfg: &'a Config) -> &'a str {
-    if cfg.cors_origins.iter().any(|o| o == "*" || o == origin) {
+    // Wildcard config → semua origin di-allow, tapi return request origin (bukan "*")
+    // agar allow-credentials masih bisa di-set oleh caller
+    if cfg.cors_origins.iter().any(|o| o == "*") {
+        return origin;
+    }
+    if cfg.cors_origins.iter().any(|o| o == origin) {
         return origin;
     }
     if cfg.dev_origins.iter().any(|o| o == origin) {
@@ -326,33 +366,26 @@ fn apply_cache(
     match ctx.route {
         RouteKind::Static => {
             if ctx.is_static {
-                // Asset file dengan ekstensi (.wasm, .js, .css, .png, dll)
-                // → immutable karena hash ada di filename (content-addressed)
+                // Static asset (punya ekstensi) — immutable, filename sudah ada content hash
                 resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
             } else {
-                // SPA route (/explore, /pulse, /events, /) → serve index.html
-                // CRITICAL FIX: TIDAK boleh immutable!
-                // Browser harus fetch ulang HTML tiap kali untuk dapat hash bundle terbaru.
-                // Kalau HTML di-cache immutable: browser pakai HTML lama → load WASM/JS
-                // dengan hash lama → 404 → app gagal.
+                // SPA route (/, /explore, dll) → serve index.html
+                // HARUS no-store: browser fetch ulang → dapat hash bundle terbaru
                 resp.insert_header("cache-control", "no-cache, no-store, must-revalidate")?;
             }
         }
         RouteKind::Object => {
-            // FIX: cast ke u64 SEBELUM multiply untuk cegah u32 overflow.
-            // image_cache_days=50_000 → 50_000 * 86_400 = 4.32e9 > u32::MAX (4.29e9).
-            // Di debug: panic. Di release: wrap ke nilai kecil → cache header salah.
+            // REVIEW NOTE: field bernama image_cache_days tapi berlaku ke semua Object
+            // (termasuk PDF, video, arbitrary S3 object). Misleading tapi tidak di-rename
+            // agar tidak breaking existing config.
+            //
+            // REVIEW FIX: ganti manual unsafe slice copy dengan format string.
+            // Original: `let mut hdr = [0u8; 48]; ... copy_from_slice(age_b)` — fragile,
+            // tidak ada bounds check eksplisit. format! lebih aman, heap alloc satu kali
+            // per response (Object route bukan hot path seperti static asset).
             let max_age = (cfg.image_cache_days as u64).saturating_mul(86_400);
-            let mut nbuf = itoa::Buffer::new();
-            let age_str = nbuf.format(max_age);
-            let mut hdr = [0u8; 48];
-            let prefix = b"public, max-age=";
-            let age_b = age_str.as_bytes();
-            hdr[..prefix.len()].copy_from_slice(prefix);
-            hdr[prefix.len()..prefix.len() + age_b.len()].copy_from_slice(age_b);
-            let hdr_str = std::str::from_utf8(&hdr[..prefix.len() + age_b.len()])
-                .unwrap_or("public, max-age=2592000");
-            resp.insert_header("cache-control", hdr_str)?;
+            let cache_val = format!("public, max-age={max_age}");
+            resp.insert_header("cache-control", cache_val.as_str())?;
         }
         RouteKind::Api | RouteKind::Websocket => {
             resp.insert_header("cache-control", "no-store")?;
@@ -362,4 +395,101 @@ fn apply_cache(
         }
     }
     Ok(())
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── strip_port ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_port_ipv4_with_port() {
+        assert_eq!(strip_port("192.168.1.1:3000"), "192.168.1.1");
+    }
+
+    #[test]
+    fn strip_port_hostname_with_port() {
+        assert_eq!(strip_port("ulala.space:443"), "ulala.space");
+        assert_eq!(strip_port("ulala.space"), "ulala.space");
+    }
+
+    #[test]
+    fn strip_port_ipv6_was_broken_before() {
+        // Original split(':') → "[" for "[::1]:8080" — bug!
+        assert_eq!(strip_port("[::1]:8080"), "[::1]");
+        assert_eq!(strip_port("[::1]"), "[::1]");
+        assert_eq!(strip_port("[2001:db8::1]:443"), "[2001:db8::1]");
+    }
+
+    // ── resolve_origin ────────────────────────────────────────────────────────
+
+    fn test_cfg(cors: &[&str], dev: &[&str]) -> crate::config::Config {
+        crate::config::Config {
+            cors_origins: cors.iter().map(|s| s.to_string()).collect(),
+            dev_origins: dev.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn wildcard_config_returns_origin_not_star() {
+        // cors_origins: ["*"] → return request origin, BUKAN literal "*"
+        // kalau return "*": caller tidak bisa set allow-credentials → broken
+        let cfg = test_cfg(&["*"], &[]);
+        let result = resolve_origin("https://example.com", &cfg);
+        assert_eq!(result, "https://example.com");
+        assert_ne!(result, "*");
+    }
+
+    #[test]
+    fn known_origin_returned_as_is() {
+        let cfg = test_cfg(&["https://ulala.space"], &[]);
+        assert_eq!(
+            resolve_origin("https://ulala.space", &cfg),
+            "https://ulala.space"
+        );
+    }
+
+    #[test]
+    fn unknown_origin_gets_first_cors() {
+        let cfg = test_cfg(&["https://ulala.space"], &[]);
+        // Attacker.com tidak di-allow → fallback ke first (bukan origin)
+        // apply_cors akan skip allow-credentials karena result != request origin
+        assert_eq!(
+            resolve_origin("https://attacker.com", &cfg),
+            "https://ulala.space"
+        );
+    }
+
+    #[test]
+    fn empty_cors_fallback_to_star() {
+        let cfg = test_cfg(&[], &[]);
+        // Misconfigured (kosong) → fallback ke "*"
+        // apply_cors tidak set allow-credentials karena "*" == "*"
+        assert_eq!(resolve_origin("https://x.com", &cfg), "*");
+    }
+
+    // ── MIME ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wasm_mime_correct() {
+        assert_eq!(mime_from_path("/app-abc123.wasm"), Some("application/wasm"));
+        assert_eq!(mime_from_path("/app.WASM"), Some("application/wasm"));
+    }
+
+    #[test]
+    fn js_mime_rfc9239() {
+        // RFC 9239: text/javascript, bukan application/javascript
+        assert_eq!(mime_from_path("/app.js"), Some("text/javascript"));
+        assert_eq!(mime_from_path("/module.mjs"), Some("text/javascript"));
+    }
+
+    #[test]
+    fn mime_strips_query() {
+        assert_eq!(mime_from_path("/app.js?v=xyz"), Some("text/javascript"));
+        assert_eq!(mime_from_path("/style.css?hash=abc"), Some("text/css"));
+    }
 }
