@@ -17,7 +17,7 @@ frontend_addr: "127.0.0.1:3100" # static-web-server (Leptos SPA)
 image_addr: "127.0.0.1:3902" # Garage S3 web UI
 rustfs_ui_address: "127.0.0.1:9001"
 rustfs_s3_address: "127.0.0.1:9000"
-frontend_dist_path: "/var/www/ulala/dist"
+frontend_dist_path: "./dist" 
 # ── TLS (Let's Encrypt) ───────────────────────────────────────────────────────
 tls_cert_web: "/etc/letsencrypt/live/ulala.space/fullchain.pem"
 tls_key_web: "/etc/letsencrypt/live/ulala.space/privkey.pem"
