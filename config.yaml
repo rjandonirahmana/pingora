@@ -17,7 +17,12 @@ frontend_addr: "127.0.0.1:3100" # static-web-server (Leptos SPA)
 image_addr: "127.0.0.1:3902" # Garage S3 web UI
 rustfs_ui_address: "127.0.0.1:9001"
 rustfs_s3_address: "127.0.0.1:9000"
-# frontend_dist_path: "./dist" 
+# ── Mode Deploy Frontend (pilih salah satu) ───────────────────────────────────
+# MODE A (aktif): Proxy ke static-web-server :3100
+#   WASM MIME dipastikan benar oleh proxy layer (application/wasm).
+#
+# MODE B: Serve langsung dari disk — uncomment baris ini, isi path ke dist Leptos
+# frontend_dist_path: "/path/to/leptos/dist"
 # ── TLS (Let's Encrypt) ───────────────────────────────────────────────────────
 tls_cert_web: "/etc/letsencrypt/live/ulala.space/fullchain.pem"
 tls_key_web: "/etc/letsencrypt/live/ulala.space/privkey.pem"

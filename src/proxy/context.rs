@@ -166,7 +166,12 @@ impl RequestCtx {
             path,
             method,
             is_ws: decision.is_ws,
-            is_static: matches!(route, RouteKind::Static),
+            // FIX: is_static harus path-based (punya ekstensi file) bukan route-based.
+            // Sebelumnya: matches!(route, RouteKind::Static) → true untuk SEMUA frontend
+            // termasuk SPA routes (/explore, /pulse, /events) yang harusnya no-cache.
+            // Akibatnya: HTML page di-cache "immutable" → browser tidak fetch bundle baru
+            // saat redeploy, dan WASM/JS hashes lama → app gagal load.
+            is_static: decision.is_static, // dari is_static_path() di router.rs
             is_api: matches!(route, RouteKind::Api | RouteKind::Websocket),
             is_object: matches!(route, RouteKind::Object),
             strip_prefix: decision.strip_prefix,
@@ -225,7 +230,7 @@ impl Default for RequestCtx {
             path: String::new(),
             method: Method::GET,
             is_ws: false,
-            is_static: true,
+            is_static: false, // FIX: default false, bukan true
             is_api: false,
             is_object: false,
             strip_prefix: None,

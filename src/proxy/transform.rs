@@ -163,7 +163,10 @@ pub fn apply_request(
     // ── 3. Forwarding headers ─────────────────────────────────────────────────
     let id_buf = ctx.id_hex_buf();
     upstream_req.insert_header("x-request-id", id_buf.as_str())?;
-    upstream_req.insert_header("x-forwarded-proto", "https")?;
+    // FIX: x-forwarded-proto harus ikut kondisi TLS aktif, bukan selalu "https".
+    // Kalau plain HTTP (dev/staging), backend Axum harus tahu agar tidak infinite redirect.
+    let proto = if cfg.tls_enabled() { "https" } else { "http" };
+    upstream_req.insert_header("x-forwarded-proto", proto)?;
     upstream_req.insert_header("x-forwarded-host", ctx.host.as_str())?;
 
     if !ctx.client_ip_str.is_empty() {
@@ -185,11 +188,17 @@ pub fn apply_response(
     apply_cors(upstream_resp, ctx, cfg, origin)?;
     apply_cache(upstream_resp, ctx, cfg)?;
 
+    // FIX: hanya override content-type untuk actual static asset files, bukan SPA routes.
+    // ctx.is_static = true → path punya ekstensi file (dari is_static_path()).
+    // SPA routes (ctx.is_static = false) biarkan upstream yang set content-type.
     if ctx.is_static || ctx.is_object {
         if let Some(mime) = mime_from_path(&ctx.path) {
             upstream_resp.insert_header("content-type", mime)?;
         }
-        upstream_resp.insert_header("content-disposition", "inline")?;
+        // content-disposition: inline hanya untuk file assets, bukan HTML
+        if ctx.is_static {
+            upstream_resp.insert_header("content-disposition", "inline")?;
+        }
     }
 
     // Security headers — &'static str, no alloc
@@ -209,6 +218,17 @@ pub fn apply_response(
         "permissions-policy",
         "geolocation=(), microphone=(), camera=()",
     )?;
+
+    // WASM FIX: Cross-Origin Isolation headers untuk frontend routes.
+    // Leptos WASM butuh ini kalau pakai SharedArrayBuffer / Atomics / threading.
+    // Tanpa COOP+COEP: browser modern (Chrome 92+, Firefox 79+) block
+    // instantiasi WASM yang butuh memory sharing atau panggil Atomics.wait().
+    // Safe untuk semua Leptos app — tidak breaking untuk non-threaded WASM.
+    if matches!(ctx.route, RouteKind::Static) {
+        upstream_resp.insert_header("cross-origin-opener-policy", "same-origin")?;
+        upstream_resp.insert_header("cross-origin-embedder-policy", "require-corp")?;
+        upstream_resp.insert_header("cross-origin-resource-policy", "same-origin")?;
+    }
 
     let id_buf = ctx.id_hex_buf();
     let mut elapsed_buf = ctx.elapsed_ms_buf();
@@ -305,7 +325,18 @@ fn apply_cache(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match ctx.route {
         RouteKind::Static => {
-            resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
+            if ctx.is_static {
+                // Asset file dengan ekstensi (.wasm, .js, .css, .png, dll)
+                // → immutable karena hash ada di filename (content-addressed)
+                resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
+            } else {
+                // SPA route (/explore, /pulse, /events, /) → serve index.html
+                // CRITICAL FIX: TIDAK boleh immutable!
+                // Browser harus fetch ulang HTML tiap kali untuk dapat hash bundle terbaru.
+                // Kalau HTML di-cache immutable: browser pakai HTML lama → load WASM/JS
+                // dengan hash lama → 404 → app gagal.
+                resp.insert_header("cache-control", "no-cache, no-store, must-revalidate")?;
+            }
         }
         RouteKind::Object => {
             // FIX: cast ke u64 SEBELUM multiply untuk cegah u32 overflow.
