@@ -137,6 +137,20 @@ impl ProxyHttp for KineticProxy {
         let decision = router::route(&host_owned, &path_owned, &self.state.cfg);
         *ctx = RequestCtx::new(decision, host_owned, path_owned, method.clone(), client_ip);
 
+        // Preflight CORS — handle untuk api DAN object storage.
+        if method == http::Method::OPTIONS && (ctx.is_api || ctx.is_object) {
+            return self.handle_preflight(session, ctx).await;
+        }
+
+        match self.state.policy.apply(ctx) {
+            Ok(()) => {}
+            Err(err) => {
+                tracing::warn!(id = ctx.id, "policy reject: {:?}", err);
+                self.reject(session, &err).await?;
+                return Ok(true);
+            }
+        }
+
         tracing::debug!(
             id       = ctx.id,
             method   = %method,
@@ -149,24 +163,28 @@ impl ProxyHttp for KineticProxy {
         if ctx.upstream == Upstream::Frontend {
             if let Some(ref static_srv) = self.state.frontend_static {
                 if static_srv.serve(session, &ctx.path).await? {
-                    return Ok(true); // request selesai, tidak perlu upstream
+                    return Ok(true); // file ditemukan & served
                 }
+
+                // FIX: Kalau ini file static (punya ekstensi) dan tidak ada di disk,
+                // jangan proxy ke upstream :3100 — langsung 404.
+                // Proxy ke :3100 cuma buat latency tinggi & confusing.
+                if ctx.is_static {
+                    let mut resp = ResponseHeader::build(http::StatusCode::NOT_FOUND, None)?;
+                    resp.insert_header("content-type", "text/plain")?;
+                    resp.insert_header("content-length", "9")?;
+                    session.write_response_header(Box::new(resp), false).await?;
+                    session
+                        .write_response_body(Some(bytes::Bytes::from_static(b"Not found")), true)
+                        .await?;
+                    return Ok(true);
+                }
+
+                // Kalau route SPA, lanjut ke upstream :3100
             }
         }
 
-        // Preflight CORS — handle untuk api DAN object storage.
-        if method == http::Method::OPTIONS && (ctx.is_api || ctx.is_object) {
-            return self.handle_preflight(session, ctx).await;
-        }
-
-        match self.state.policy.apply(ctx) {
-            Ok(()) => Ok(false),
-            Err(err) => {
-                tracing::warn!(id = ctx.id, "policy reject: {:?}", err);
-                self.reject(session, &err).await?;
-                Ok(true)
-            }
-        }
+        Ok(false)
     }
 
     // ── Phase 2: Pilih upstream ───────────────────────────────────────────────
