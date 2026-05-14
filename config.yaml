@@ -46,6 +46,7 @@ upstream_pool_size: 64
 # Tambah port lain sesuai kebutuhan (Vite default 5173, CRA 3000, dll).
 dev_origins:
   - "http://localhost:3000"
+  - "http://77.237.242.1:3100"
   - "http://localhost:5173"
   - "http://localhost:4000"
   # - "http://127.0.0.1:3000"  # uncomment jika pakai 127.0.0.1 bukan localhost
