@@ -228,29 +228,34 @@ pub fn apply_response(
         "geolocation=(), microphone=(), camera=()",
     )?;
 
-    // REVIEW: Content-Security-Policy + Cross-Origin Isolation untuk frontend Leptos WASM.
-    // CSP:
-    //   script-src 'wasm-unsafe-eval' — diperlukan untuk WASM instantiation (CSP Level 3)
-    //     bukan 'unsafe-eval' (terlalu broad, izinkan eval() string)
-    //   style-src 'unsafe-inline' — Leptos/Trunk inject <style> tag saat runtime
-    //   connect-src — izinkan fetch/WS ke API domain
-    // Sesuaikan jika pakai CDN font atau third-party script.
+    // Content-Security-Policy untuk frontend Leptos WASM.
+    //
+    // BUG FIX (COEP require-corp dihapus):
+    //   COEP: require-corp mewajibkan SEMUA cross-origin resource punya header
+    //   "Cross-Origin-Resource-Policy: cross-origin". Google Fonts tidak set header ini.
+    //   Akibat: browser blok font CSS → font gagal load → bisa cascade ke render error.
+    //   COEP hanya diperlukan kalau WASM pakai SharedArrayBuffer/Atomics (threading Rayon).
+    //   Leptos ticketing app tidak perlu ini → hapus.
+    //
+    // BUG FIX (CSP style-src & font-src):
+    //   CSP sebelumnya: style-src 'self' → blok fonts.googleapis.com.
+    //   CSP sebelumnya: font-src 'self' → blok fonts.gstatic.com.
+    //   Fix: tambahkan kedua domain ke directive masing-masing.
+    //
+    // CSP notes:
+    //   'wasm-unsafe-eval'  — WASM instantiation, CSP Level 3 (bukan broad 'unsafe-eval')
+    //   'unsafe-inline'     — Leptos/Trunk inject <style> tag di runtime
+    //   connect-src         — fetch/WS ke API domain
     if matches!(ctx.route, RouteKind::Static) {
         let api = cfg.api_domain.as_str();
         let csp = format!(
-            "default-src 'self'; \
-             script-src 'self' 'wasm-unsafe-eval'; \
-             style-src 'self' 'unsafe-inline'; \
-             img-src 'self' data: blob:; \
-             connect-src 'self' https://{api} wss://{api}; \
-             font-src 'self'; \
-             object-src 'none'; \
-             base-uri 'self'",
+            "default-src 'self';              script-src 'self' 'wasm-unsafe-eval';              style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;              font-src 'self' https://fonts.gstatic.com;              img-src 'self' data: blob:;              connect-src 'self' https://{api} wss://{api};              object-src 'none';              base-uri 'self'",
         );
         upstream_resp.insert_header("content-security-policy", csp.as_str())?;
-        // Cross-Origin Isolation untuk WASM SharedArrayBuffer/threading
+        // COOP: same-origin dipertahankan — isolasi window.opener, tidak break cross-origin.
+        // COEP: DIHAPUS (lihat komentar di atas).
         upstream_resp.insert_header("cross-origin-opener-policy", "same-origin")?;
-        upstream_resp.insert_header("cross-origin-embedder-policy", "require-corp")?;
+        // CORP untuk aset frontend yang di-embed pihak lain: default same-origin sudah aman.
         upstream_resp.insert_header("cross-origin-resource-policy", "same-origin")?;
     }
 
