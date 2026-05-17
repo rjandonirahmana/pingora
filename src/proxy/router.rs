@@ -1,96 +1,48 @@
 //! Router — pure function, zero side-effect, zero allocation.
 //!
-//! Cloudflare-style: routing adalah fungsi deterministik yang:
-//!   - Tidak log apapun
-//!   - Tidak allocate String baru (pakai &str dari header langsung)
-//!   - Tidak baca network / disk
-//!   - Return RouteDecision yang langsung bisa dipakai semua layer
-//!
-//! Fix dari original:
-//!   - is_static_path(): tambah extensi gambar/font umum (.png, .jpg, .webp, .woff2, dll)
-//!     agar cache header "public, max-age=31536000" di-set untuk asset frontend
+//! Fix:
+//!   [BUG] ulala.space/api/* sebelumnya selalu routing ke Frontend (static-web-server).
+//!   FE yang di-build dengan KINETIC_API_BASE_URL=/api (relative, default) akan
+//!   mengirim semua XHR ke ulala.space/api/... → static-web-server → 404.
+//!   Fix: tambahkan /api/* dan /api/ws/* handling sebelum fallback ke Frontend.
+//!   Sekarang FE cukup di-build dengan default KINETIC_API_BASE_URL=/api — tidak
+//!   perlu hardcode IP atau domain API terpisah.
 //!
 //! Rule (first-match):
-//!   1. web_domain                       → Frontend
-//!   2. image_subdomain                  → RustFS3 (no strip)
-//!   3. ui_subdomain                     → RustFSUI
-//!   4. api_domain + /image/*            → RustFS3 (strip "/image")
-//!   5. api_domain + /api/ws/*           → Backend (WebSocket)
-//!   6. api_domain + /api/*              → Backend (REST)
-//!   7. api_domain                       → Backend (fallback)
-//!   8. *                                → Frontend (fallback)
+//!   1. web_domain + /api/ws/*               → Backend (WebSocket, same-domain WS)
+//!   2. web_domain + /api/*                  → Backend (REST, relative URL support)
+//!   3. web_domain                            → Frontend
+//!   4. image_subdomain                      → RustFS3 (no strip)
+//!   5. ui_subdomain                         → RustFSUI
+//!   6. api_domain + /image/*               → RustFS3 (strip "/image")
+//!   7. api_domain + /api/ws/*              → Backend (WebSocket)
+//!   8. api_domain + /api/*                 → Backend (REST)
+//!   9. api_domain                           → Backend (fallback)
+//!  10. *                                    → Frontend (fallback)
 
 use crate::config::Config;
 use crate::upstream::Upstream;
 
 // ─── RouteDecision ────────────────────────────────────────────────────────────
 
-/// Hasil routing — immutable, dibuat sekali per request.
 #[derive(Debug, Clone, Copy)]
 pub struct RouteDecision {
     pub upstream: Upstream,
-    /// Prefix yang di-strip dari path sebelum forward ke upstream.
-    /// `None` = tidak ada stripping.
     pub strip_prefix: Option<&'static str>,
-    /// Apakah request ini WebSocket?
     pub is_ws: bool,
-    /// Apakah path ini asset static?
     pub is_static: bool,
 }
 
-// ─── Pure router ─────────────────────────────────────────────────────────────
+// ─── Pure router ──────────────────────────────────────────────────────────────
 
-/// Entry point router — dipanggil tepat sekali per request.
-///
-/// Semua parameter adalah &str (reference ke data yang sudah ada di heap),
-/// tidak ada allocation baru.
 #[inline]
 pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
     let host = bare_host(host);
 
-    // ── 1. Frontend (ulala.space / www.ulala.space) ───────────────────────────
+    // ── 1-3. Web domain (ulala.space) ─────────────────────────────────────────
     if is_web_domain(host, cfg) {
-        return RouteDecision {
-            upstream: Upstream::Frontend,
-            strip_prefix: None,
-            is_ws: false,
-            is_static: is_static_path(path),
-        };
-    }
-
-    // ── 2. Object storage via subdomain (image.ulalaapi.store) ───────────────
-    if host == cfg.image_subdomain.as_str() {
-        return RouteDecision {
-            upstream: Upstream::RustFS3,
-            strip_prefix: None, // path langsung ke S3, tidak di-strip
-            is_ws: false,
-            is_static: false,
-        };
-    }
-
-    // ── 3. Storage console via subdomain (ui.ulalaapi.store) ─────────────────
-    if host == cfg.ui_subdomain.as_str() {
-        return RouteDecision {
-            upstream: Upstream::RustFSUI,
-            strip_prefix: None,
-            is_ws: false,
-            is_static: false,
-        };
-    }
-
-    // ── 4-7. API domain (ulalaapi.store) ──────────────────────────────────────
-    if is_api_domain(host, cfg) {
-        // 4. /image/* → S3 (backward compat, strip "/image" prefix)
-        if path.starts_with("/image/") || path == "/image" {
-            return RouteDecision {
-                upstream: Upstream::RustFS3,
-                strip_prefix: Some("/image"),
-                is_ws: false,
-                is_static: false,
-            };
-        }
-
-        // 5. WebSocket
+        // BUG FIX: /api/ws/* → Backend WebSocket.
+        // Tanpa ini, WS dari FE (relative wss://) tidak pernah sampai ke Axum.
         if is_ws_path(path) {
             return RouteDecision {
                 upstream: Upstream::Backend,
@@ -100,7 +52,10 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
             };
         }
 
-        // 6. REST API
+        // BUG FIX: /api/* → Backend REST.
+        // FE default build: KINETIC_API_BASE_URL=/api → semua XHR ke /api/...
+        // Sebelumnya: semua path ulala.space → Frontend → static-web-server 404.
+        // Sekarang: /api/* di web domain di-proxy ke Axum sama seperti api_domain.
         if path.starts_with("/api/") || path == "/api" {
             return RouteDecision {
                 upstream: Upstream::Backend,
@@ -110,7 +65,68 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
             };
         }
 
-        // 7. Fallback api domain
+        // Semua path lain → SPA / static asset
+        return RouteDecision {
+            upstream: Upstream::Frontend,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: is_static_path(path),
+        };
+    }
+
+    // ── 4. Object storage via subdomain (image.ulalaapi.store) ───────────────
+    if host == cfg.image_subdomain.as_str() {
+        return RouteDecision {
+            upstream: Upstream::RustFS3,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
+    // ── 5. Storage console via subdomain (ui.ulalaapi.store) ─────────────────
+    if host == cfg.ui_subdomain.as_str() {
+        return RouteDecision {
+            upstream: Upstream::RustFSUI,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
+    // ── 6-9. API domain (ulalaapi.store) ──────────────────────────────────────
+    if is_api_domain(host, cfg) {
+        // 6. /image/* → S3 (strip "/image")
+        if path.starts_with("/image/") || path == "/image" {
+            return RouteDecision {
+                upstream: Upstream::RustFS3,
+                strip_prefix: Some("/image"),
+                is_ws: false,
+                is_static: false,
+            };
+        }
+
+        // 7. WebSocket
+        if is_ws_path(path) {
+            return RouteDecision {
+                upstream: Upstream::Backend,
+                strip_prefix: None,
+                is_ws: true,
+                is_static: false,
+            };
+        }
+
+        // 8. REST API
+        if path.starts_with("/api/") || path == "/api" {
+            return RouteDecision {
+                upstream: Upstream::Backend,
+                strip_prefix: None,
+                is_ws: false,
+                is_static: false,
+            };
+        }
+
+        // 9. Fallback api domain
         return RouteDecision {
             upstream: Upstream::Backend,
             strip_prefix: None,
@@ -119,7 +135,7 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
         };
     }
 
-    // ── 8. Fallback global ────────────────────────────────────────────────────
+    // ── 10. Fallback global ───────────────────────────────────────────────────
     RouteDecision {
         upstream: Upstream::Frontend,
         strip_prefix: None,
@@ -128,12 +144,8 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
     }
 }
 
-// ─── Helpers (inline, zero alloc) ────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Strip port dari host header, handle IPv6 dengan benar.
-///
-/// REVIEW FIX: split(':') pecah IPv6 literal "[::1]:8080" → "[" (salah).
-/// Delegasi ke transform::strip_port() yang handle bracket notation.
 #[inline]
 fn bare_host(host: &str) -> &str {
     crate::proxy::transform::strip_port(host)
@@ -210,12 +222,47 @@ mod tests {
         assert!(route("ulala.space", "/static/app.js", &c).is_static);
     }
 
+    // ── BUG FIX tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn web_domain_api_routes_to_backend() {
+        // FE di-build dengan KINETIC_API_BASE_URL=/api (relative, default).
+        // /api/* pada ulala.space HARUS ke Backend, bukan Frontend.
+        let c = cfg();
+        let d = route("ulala.space", "/api/orders", &c);
+        assert_eq!(d.upstream, Upstream::Backend, "/api/* harus ke Backend");
+        assert!(!d.is_ws);
+        assert!(!d.is_static);
+    }
+
+    #[test]
+    fn web_domain_ws_routes_to_backend() {
+        let c = cfg();
+        let d = route("ulala.space", "/api/ws/chat", &c);
+        assert_eq!(d.upstream, Upstream::Backend);
+        assert!(d.is_ws, "/api/ws/* harus is_ws=true");
+    }
+
+    #[test]
+    fn web_domain_spa_routes_to_frontend() {
+        // Non-API paths tetap ke Frontend
+        let c = cfg();
+        assert_eq!(
+            route("ulala.space", "/explore", &c).upstream,
+            Upstream::Frontend
+        );
+        assert_eq!(
+            route("ulala.space", "/orders/123", &c).upstream,
+            Upstream::Frontend
+        );
+    }
+
     #[test]
     fn subdomain_routes() {
         let c = cfg();
         let img = route("image.ulalaapi.store", "/bucket/photo.jpg", &c);
         assert_eq!(img.upstream, Upstream::RustFS3);
-        assert!(img.strip_prefix.is_none(), "subdomain tidak boleh strip");
+        assert!(img.strip_prefix.is_none());
 
         let ui = route("ui.ulalaapi.store", "/dashboard", &c);
         assert_eq!(ui.upstream, Upstream::RustFSUI);
@@ -247,7 +294,6 @@ mod tests {
 
     #[test]
     fn deterministic() {
-        // Router harus return hasil yang sama untuk input sama
         let c = cfg();
         for _ in 0..1000 {
             let a = route("ulalaapi.store", "/api/events", &c);

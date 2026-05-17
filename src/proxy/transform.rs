@@ -248,8 +248,14 @@ pub fn apply_response(
     //   connect-src         — fetch/WS ke API domain
     if matches!(ctx.route, RouteKind::Static) {
         let api = cfg.api_domain.as_str();
+        // BUG FIX: connect-src sebelumnya hanya allow ulalaapi.store.
+        // Sekarang /api/* dari web domain di-route ke Backend (lihat router.rs fix),
+        // sehingga FE yang di-build dengan KINETIC_API_BASE_URL=/api mengirim request
+        // ke 'self' (ulala.space/api) — sudah tercakup oleh 'self' di connect-src.
+        // https://{api} dan wss://{api} tetap untuk backward-compat jika ada yang
+        // build FE dengan absolute URL ke ulalaapi.store.
         let csp = format!(
-            "default-src 'self';              script-src 'self' 'wasm-unsafe-eval';              style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;              font-src 'self' https://fonts.gstatic.com;              img-src 'self' data: blob:;              connect-src 'self' https://{api} wss://{api};              object-src 'none';              base-uri 'self'",
+            "default-src 'self';              script-src 'self' 'wasm-unsafe-eval';              style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;              font-src 'self' https://fonts.gstatic.com;              img-src 'self' data: blob: https://{api};              connect-src 'self' https://{api} wss://{api};              object-src 'none';              base-uri 'self'",
         );
         upstream_resp.insert_header("content-security-policy", csp.as_str())?;
         // COOP: same-origin dipertahankan — isolasi window.opener, tidak break cross-origin.
@@ -302,7 +308,7 @@ fn apply_cors(
                 )?;
                 resp.insert_header(
                     "access-control-allow-headers",
-                    "authorization, content-type, x-request-id",
+                    "authorization, content-type, x-request-id, x-app-token", // FIX: x-app-token wajib untuk internal JWT FE
                 )?;
                 resp.insert_header(
                     "access-control-expose-headers",

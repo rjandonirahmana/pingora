@@ -357,7 +357,7 @@ impl KineticProxy {
                 )?;
                 resp.insert_header(
                     "access-control-allow-headers",
-                    "authorization, content-type, x-request-id",
+                    "authorization, content-type, x-request-id, x-app-token", // FIX: x-app-token internal JWT
                 )?;
                 resp.insert_header("access-control-max-age", "86400")?;
             }
