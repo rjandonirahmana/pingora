@@ -1,0 +1,46 @@
+# ── static-web-server config untuk Leptos WASM SPA ───────────────────────────
+# File ini di-copy ke container via Dockerfile:
+#   COPY server.toml /etc/static-web-server/config.toml
+#
+# Pingora (ulala.space) proxy ke container ini di port 3000.
+
+[general]
+host    = "0.0.0.0"
+port    = 3000
+root    = "/public"
+log-level = "info"
+
+# WAJIB: SPA fallback.
+# Tanpa ini, reload di /explore / /tickets / /profile → 404.
+# static-web-server return index.html untuk semua path yang tidak ada filenya.
+page-fallback = "/public/index.html"
+
+[advanced]
+# Jangan compress lagi di server — Pingora di atas tidak re-compress,
+# tapi tetap matikan di sini untuk kejelasan dan hindari overhead.
+compression = false
+
+# Serve pre-compressed .br / .gz yang sudah di-generate oleh optimize-wasm.sh.
+# static-web-server cek: kalau ada app_bg.wasm.br dan client support br → serve itu.
+# Content-Encoding: br di-set otomatis.
+compression-static = true
+
+# MIME type untuk WASM — pastikan benar agar browser tidak reject.
+# static-web-server sudah built-in support application/wasm untuk .wasm.
+# Tapi tambahkan eksplisit sebagai safety net.
+[[advanced.headers]]
+source  = "**/*.wasm"
+headers = [{ key = "Content-Type", value = "application/wasm" }]
+
+# Cache: aset dengan content hash → immutable (sama dengan Pingora)
+[[advanced.headers]]
+source  = "**/*.wasm"
+headers = [{ key = "Cache-Control", value = "public, max-age=31536000, immutable" }]
+
+[[advanced.headers]]
+source  = "**/*.js"
+headers = [{ key = "Cache-Control", value = "public, max-age=31536000, immutable" }]
+
+[[advanced.headers]]
+source  = "**/*.css"
+headers = [{ key = "Cache-Control", value = "public, max-age=31536000, immutable" }]

@@ -8,6 +8,10 @@
 //!   Sekarang FE cukup di-build dengan default KINETIC_API_BASE_URL=/api — tidak
 //!   perlu hardcode IP atau domain API terpisah.
 //!
+//! Fix (brotli/gzip):
+//!   is_static_path sekarang juga mengenali .br dan .gz extension agar
+//!   request ke pre-compressed variant mendapat cache policy dan MIME yang benar.
+//!
 //! Rule (first-match):
 //!   1. web_domain + /api/ws/*               → Backend (WebSocket, same-domain WS)
 //!   2. web_domain + /api/*                  → Backend (REST, relative URL support)
@@ -172,22 +176,50 @@ fn is_ws_path(path: &str) -> bool {
     path.starts_with("/api/ws/") || path == "/api/ws"
 }
 
+/// Deteksi apakah path adalah file static (punya ekstensi yang dikenal).
+///
+/// FIX (brotli/gzip): Tambahkan .br dan .gz variant agar request ke
+/// pre-compressed file mendapat:
+///   - Cache policy yang benar (immutable bukan no-store)
+///   - Content-type di-set dari nama file asli (lihat transform.rs)
+///   - Tidak di-404 oleh is_static guard di mod.rs
+///
+/// Kenapa penting:
+///   static-web-server (MODE A) transparently serve .br/.gz via content negotiation
+///   → URL tetap /app.wasm tapi response bisa brotli-encoded.
+///   Tapi kalau ada client yang request /app.wasm.br langsung (rare, tapi valid),
+///   Pingora harus treat itu sebagai static file, bukan SPA route.
 #[inline]
 fn is_static_path(path: &str) -> bool {
     path.starts_with("/static/")
+        // WASM dan pre-compressed variants
         || path.ends_with(".wasm")
+        || path.ends_with(".wasm.br")
+        || path.ends_with(".wasm.gz")
+        // JavaScript dan pre-compressed variants
         || path.ends_with(".js")
+        || path.ends_with(".js.br")
+        || path.ends_with(".js.gz")
         || path.ends_with(".mjs")
+        || path.ends_with(".mjs.br")
+        || path.ends_with(".mjs.gz")
+        // CSS dan pre-compressed variants
         || path.ends_with(".css")
+        || path.ends_with(".css.br")
+        || path.ends_with(".css.gz")
+        // Icons dan images
         || path.ends_with(".ico")
         || path.ends_with(".png")
         || path.ends_with(".jpg")
         || path.ends_with(".jpeg")
         || path.ends_with(".webp")
+        || path.ends_with(".avif")
         || path.ends_with(".svg")
+        // Fonts
         || path.ends_with(".woff")
         || path.ends_with(".woff2")
         || path.ends_with(".ttf")
+        // Source maps
         || path.ends_with(".map")
 }
 
@@ -226,8 +258,6 @@ mod tests {
 
     #[test]
     fn web_domain_api_routes_to_backend() {
-        // FE di-build dengan KINETIC_API_BASE_URL=/api (relative, default).
-        // /api/* pada ulala.space HARUS ke Backend, bukan Frontend.
         let c = cfg();
         let d = route("ulala.space", "/api/orders", &c);
         assert_eq!(d.upstream, Upstream::Backend, "/api/* harus ke Backend");
@@ -245,7 +275,6 @@ mod tests {
 
     #[test]
     fn web_domain_spa_routes_to_frontend() {
-        // Non-API paths tetap ke Frontend
         let c = cfg();
         assert_eq!(
             route("ulala.space", "/explore", &c).upstream,
@@ -290,6 +319,27 @@ mod tests {
         let d = route("ulalaapi.store", "/api/events", &c);
         assert_eq!(d.upstream, Upstream::Backend);
         assert!(!d.is_ws);
+    }
+
+    // ── Brotli/Gzip is_static tests ───────────────────────────────────────────
+
+    #[test]
+    fn wasm_br_is_static() {
+        let c = cfg();
+        // .wasm.br harus is_static = true
+        assert!(route("ulala.space", "/app_bg.wasm.br", &c).is_static);
+        assert!(route("ulala.space", "/app_bg.wasm.gz", &c).is_static);
+        assert!(route("ulala.space", "/app.js.br", &c).is_static);
+        assert!(route("ulala.space", "/style.css.gz", &c).is_static);
+    }
+
+    #[test]
+    fn wasm_br_routes_to_frontend() {
+        let c = cfg();
+        assert_eq!(
+            route("ulala.space", "/app_bg.wasm.br", &c).upstream,
+            Upstream::Frontend
+        );
     }
 
     #[test]

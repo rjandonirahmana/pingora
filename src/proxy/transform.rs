@@ -10,6 +10,9 @@
 //!   [review] content-disposition skip untuk SVG/HTML (XSS vector kalau inline)
 //!   [review] apply_cache buffer: ganti manual slice copy dengan format string yg aman
 //!   [review] Tambah Content-Security-Policy baseline untuk frontend
+//!   [fix] Tambah MIME type untuk .br dan .gz pre-compressed files
+//!   [fix] mime_from_path untuk .br/.gz: MIME dari inner extension (e.g. .wasm.br → application/wasm)
+//!         sehingga Content-Type benar kalau ada yang request file compressed langsung
 
 use pingora_http::{RequestHeader, ResponseHeader};
 
@@ -18,9 +21,30 @@ use crate::proxy::context::{RequestCtx, RouteKind};
 
 // ─── MIME map ─────────────────────────────────────────────────────────────────
 
+/// Resolve MIME type dari path file.
+///
+/// FIX (brotli/gzip): untuk path yang berakhir .br atau .gz,
+/// strip suffix tersebut terlebih dahulu sehingga MIME type diambil
+/// dari ekstensi file aslinya.
+///
+/// Contoh:
+///   /app_bg.wasm.br  → strip ".br"  → /app_bg.wasm → "application/wasm"
+///   /style.css.gz    → strip ".gz"  → /style.css   → "text/css"
+///   /app_bg.wasm     → langsung     →               → "application/wasm"
 #[inline]
 pub fn mime_from_path(path: &str) -> Option<&'static str> {
-    let ext = path
+    // Strip .br / .gz suffix dulu sebelum resolve MIME.
+    // Ini penting agar request ke /app.wasm.br dapat Content-Type: application/wasm
+    // bukan Content-Type: application/x-br yang tidak dikenal browser.
+    let effective_path = if path.ends_with(".br") {
+        &path[..path.len() - 3] // strip ".br"
+    } else if path.ends_with(".gz") {
+        &path[..path.len() - 3] // strip ".gz"
+    } else {
+        path
+    };
+
+    let ext = effective_path
         .rsplit('.')
         .next()
         .unwrap_or("")
@@ -31,7 +55,6 @@ pub fn mime_from_path(path: &str) -> Option<&'static str> {
     match_ext_ci(ext)
 }
 
-// REVIEW: refactor ke match + eq_ignore_ascii_case untuk readability
 fn match_ext_ci(ext: &str) -> Option<&'static str> {
     match ext {
         e if e.eq_ignore_ascii_case("png") => Some("image/png"),
@@ -131,10 +154,6 @@ pub fn apply_request(
     upstream_req.insert_header("host", host_val)?;
 
     // ── 3. Forwarding headers ─────────────────────────────────────────────────
-    // REVIEW: X-Forwarded-For trust model — proxy ini adalah edge proxy.
-    // IP dari session.client_addr() adalah koneksi TCP langsung, tidak bisa di-spoof.
-    // Kalau di-deploy di belakang LB lain (AWS ALB, Cloudflare, dll), ganti dengan:
-    // baca X-Forwarded-For yang sudah ada dari upstream lalu append, bukan override.
     let id_buf = ctx.id_hex_buf();
     upstream_req.insert_header("x-request-id", id_buf.as_str())?;
     let proto = if cfg.tls_enabled() { "https" } else { "http" };
@@ -162,6 +181,10 @@ pub fn apply_response(
 
     // Override content-type hanya untuk actual static asset files (punya ekstensi).
     // SPA routes (ctx.is_static = false) biarkan upstream set content-type-nya.
+    //
+    // FIX (brotli): mime_from_path sekarang aware .br/.gz suffix — kalau ctx.path
+    // adalah "/app.wasm.br", MIME yang di-set tetap "application/wasm" (benar),
+    // bukan "application/x-br" atau unknown.
     if ctx.is_static || ctx.is_object {
         if let Some(mime) = mime_from_path(&ctx.path) {
             upstream_resp.insert_header("content-type", mime)?;
@@ -172,13 +195,24 @@ pub fn apply_response(
         // HTML juga bisa eksekusi script. JS/CSS sudah ada MIME enforcement.
         // Binary assets (image raster, font, audio, video, wasm) aman di-inline.
         let path_lower = ctx.path.to_ascii_lowercase();
-        let ext = path_lower
+
+        // Untuk .br/.gz path, check ekstensi file aslinya
+        let effective_lower = if path_lower.ends_with(".br") {
+            &path_lower[..path_lower.len() - 3]
+        } else if path_lower.ends_with(".gz") {
+            &path_lower[..path_lower.len() - 3]
+        } else {
+            &path_lower
+        };
+
+        let ext = effective_lower
             .rsplit('.')
             .next()
             .unwrap_or("")
             .split('?')
             .next()
             .unwrap_or("");
+
         let safe_for_inline = matches!(
             ext,
             "wasm"
@@ -207,15 +241,11 @@ pub fn apply_response(
         if safe_for_inline {
             upstream_resp.insert_header("content-disposition", "inline")?;
         }
-        // SVG, HTML, JS, CSS: tidak set content-disposition — browser default.
     }
 
     // ── Security headers ──────────────────────────────────────────────────────
     upstream_resp.insert_header("x-content-type-options", "nosniff")?;
     upstream_resp.insert_header("x-frame-options", "SAMEORIGIN")?;
-    // REVIEW: x-xss-protection DIHAPUS — deprecated di semua browser modern (Chrome 78+).
-    // Pernah membuka reflection XSS di IE/Edge lama via filter bypass.
-    // CSP di bawah yang handle XSS protection.
     upstream_resp.insert_header("referrer-policy", "strict-origin-when-cross-origin")?;
     if cfg.tls_enabled() {
         upstream_resp.insert_header(
@@ -248,14 +278,15 @@ pub fn apply_response(
     //   connect-src         — fetch/WS ke API domain
     if matches!(ctx.route, RouteKind::Static) {
         let api = cfg.api_domain.as_str();
-        // BUG FIX: connect-src sebelumnya hanya allow ulalaapi.store.
-        // Sekarang /api/* dari web domain di-route ke Backend (lihat router.rs fix),
-        // sehingga FE yang di-build dengan KINETIC_API_BASE_URL=/api mengirim request
-        // ke 'self' (ulala.space/api) — sudah tercakup oleh 'self' di connect-src.
-        // https://{api} dan wss://{api} tetap untuk backward-compat jika ada yang
-        // build FE dengan absolute URL ke ulalaapi.store.
         let csp = format!(
-            "default-src 'self';              script-src 'self' 'wasm-unsafe-eval';              style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;              font-src 'self' https://fonts.gstatic.com;              img-src 'self' data: blob: https://{api};              connect-src 'self' https://{api} wss://{api};              object-src 'none';              base-uri 'self'",
+            "default-src 'self'; \
+             script-src 'self' 'wasm-unsafe-eval'; \
+             style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+             font-src 'self' https://fonts.gstatic.com; \
+             img-src 'self' data: blob: https://{api}; \
+             connect-src 'self' https://{api} wss://{api}; \
+             object-src 'none'; \
+             base-uri 'self'",
         );
         upstream_resp.insert_header("content-security-policy", csp.as_str())?;
         // COOP: same-origin dipertahankan — isolasi window.opener, tidak break cross-origin.
@@ -296,9 +327,6 @@ fn apply_cors(
             if ctx.is_api {
                 resp.insert_header("vary", "origin")?;
                 resp.insert_header("access-control-allow-origin", allowed)?;
-                // REVIEW FIX: SPEC BUG — RFC 7480 §6.1 melarang credentials + wildcard.
-                // Browser reject response kalau allow-origin: * + allow-credentials: true.
-                // resolve_origin() return "*" hanya kalau cors_origins kosong (misconfigured).
                 if allowed != "*" {
                     resp.insert_header("access-control-allow-credentials", "true")?;
                 }
@@ -308,7 +336,7 @@ fn apply_cors(
                 )?;
                 resp.insert_header(
                     "access-control-allow-headers",
-                    "authorization, content-type, x-request-id, x-app-token", // FIX: x-app-token wajib untuk internal JWT FE
+                    "authorization, content-type, x-request-id, x-app-token",
                 )?;
                 resp.insert_header(
                     "access-control-expose-headers",
@@ -320,7 +348,6 @@ fn apply_cors(
         Upstream::RustFS3 => {
             resp.insert_header("vary", "origin")?;
             resp.insert_header("access-control-allow-origin", allowed)?;
-            // REVIEW FIX: sama, jangan set credentials kalau wildcard
             if allowed != "*" {
                 resp.insert_header("access-control-allow-credentials", "true")?;
             }
@@ -341,20 +368,7 @@ fn apply_cors(
 }
 
 /// Resolve origin untuk CORS — return origin yang di-allow atau fallback.
-///
-/// REVIEW: jangan return "*" kalau config mengharuskan credentials.
-/// Caller (`apply_cors`, `handle_preflight`) WAJIB cek result != "*" sebelum
-/// set `access-control-allow-credentials: true`.
-///
-/// Urutan:
-///   1. cors_origins berisi "*" → return request origin (BUKAN literal "*")
-///      sehingga allow-credentials tetap bisa jalan
-///   2. origin di cors_origins   → return origin
-///   3. origin di dev_origins    → return origin
-///   4. Fallback                 → first cors_origin atau "*" (misconfigured)
 pub fn resolve_origin<'a>(origin: &'a str, cfg: &'a Config) -> &'a str {
-    // Wildcard config → semua origin di-allow, tapi return request origin (bukan "*")
-    // agar allow-credentials masih bisa di-set oleh caller
     if cfg.cors_origins.iter().any(|o| o == "*") {
         return origin;
     }
@@ -377,7 +391,8 @@ fn apply_cache(
     match ctx.route {
         RouteKind::Static => {
             if ctx.is_static {
-                // Static asset (punya ekstensi) — immutable, filename sudah ada content hash
+                // Static asset (punya ekstensi) — immutable, filename sudah ada content hash.
+                // Berlaku juga untuk .br/.gz variant karena is_static_path sudah cover keduanya.
                 resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
             } else {
                 // SPA route (/, /explore, dll) → serve index.html
@@ -386,14 +401,6 @@ fn apply_cache(
             }
         }
         RouteKind::Object => {
-            // REVIEW NOTE: field bernama image_cache_days tapi berlaku ke semua Object
-            // (termasuk PDF, video, arbitrary S3 object). Misleading tapi tidak di-rename
-            // agar tidak breaking existing config.
-            //
-            // REVIEW FIX: ganti manual unsafe slice copy dengan format string.
-            // Original: `let mut hdr = [0u8; 48]; ... copy_from_slice(age_b)` — fragile,
-            // tidak ada bounds check eksplisit. format! lebih aman, heap alloc satu kali
-            // per response (Object route bukan hot path seperti static asset).
             let max_age = (cfg.image_cache_days as u64).saturating_mul(86_400);
             let cache_val = format!("public, max-age={max_age}");
             resp.insert_header("cache-control", cache_val.as_str())?;
@@ -429,7 +436,6 @@ mod tests {
 
     #[test]
     fn strip_port_ipv6_was_broken_before() {
-        // Original split(':') → "[" for "[::1]:8080" — bug!
         assert_eq!(strip_port("[::1]:8080"), "[::1]");
         assert_eq!(strip_port("[::1]"), "[::1]");
         assert_eq!(strip_port("[2001:db8::1]:443"), "[2001:db8::1]");
@@ -447,8 +453,6 @@ mod tests {
 
     #[test]
     fn wildcard_config_returns_origin_not_star() {
-        // cors_origins: ["*"] → return request origin, BUKAN literal "*"
-        // kalau return "*": caller tidak bisa set allow-credentials → broken
         let cfg = test_cfg(&["*"], &[]);
         let result = resolve_origin("https://example.com", &cfg);
         assert_eq!(result, "https://example.com");
@@ -467,8 +471,6 @@ mod tests {
     #[test]
     fn unknown_origin_gets_first_cors() {
         let cfg = test_cfg(&["https://ulala.space"], &[]);
-        // Attacker.com tidak di-allow → fallback ke first (bukan origin)
-        // apply_cors akan skip allow-credentials karena result != request origin
         assert_eq!(
             resolve_origin("https://attacker.com", &cfg),
             "https://ulala.space"
@@ -478,8 +480,6 @@ mod tests {
     #[test]
     fn empty_cors_fallback_to_star() {
         let cfg = test_cfg(&[], &[]);
-        // Misconfigured (kosong) → fallback ke "*"
-        // apply_cors tidak set allow-credentials karena "*" == "*"
         assert_eq!(resolve_origin("https://x.com", &cfg), "*");
     }
 
@@ -493,7 +493,6 @@ mod tests {
 
     #[test]
     fn js_mime_rfc9239() {
-        // RFC 9239: text/javascript, bukan application/javascript
         assert_eq!(mime_from_path("/app.js"), Some("text/javascript"));
         assert_eq!(mime_from_path("/module.mjs"), Some("text/javascript"));
     }
@@ -502,5 +501,50 @@ mod tests {
     fn mime_strips_query() {
         assert_eq!(mime_from_path("/app.js?v=xyz"), Some("text/javascript"));
         assert_eq!(mime_from_path("/style.css?hash=abc"), Some("text/css"));
+    }
+
+    // ── FIX: MIME untuk .br dan .gz pre-compressed files ──────────────────────
+
+    #[test]
+    fn wasm_br_gets_wasm_mime() {
+        // .wasm.br → strip .br → resolve dari .wasm → application/wasm
+        assert_eq!(
+            mime_from_path("/app_bg.wasm.br"),
+            Some("application/wasm"),
+            ".wasm.br harus dapat MIME application/wasm, bukan unknown"
+        );
+    }
+
+    #[test]
+    fn wasm_gz_gets_wasm_mime() {
+        assert_eq!(
+            mime_from_path("/app_bg.wasm.gz"),
+            Some("application/wasm"),
+            ".wasm.gz harus dapat MIME application/wasm"
+        );
+    }
+
+    #[test]
+    fn js_br_gets_js_mime() {
+        assert_eq!(
+            mime_from_path("/app.js.br"),
+            Some("text/javascript"),
+            ".js.br harus dapat MIME text/javascript"
+        );
+    }
+
+    #[test]
+    fn css_gz_gets_css_mime() {
+        assert_eq!(
+            mime_from_path("/style.css.gz"),
+            Some("text/css"),
+            ".css.gz harus dapat MIME text/css"
+        );
+    }
+
+    #[test]
+    fn br_without_known_inner_ext_returns_none() {
+        // File .unknown.br → inner ext "unknown" → None
+        assert_eq!(mime_from_path("/data.unknown.br"), None);
     }
 }

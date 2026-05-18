@@ -6,6 +6,13 @@
 //!   - Canonicalize path saat startup
 //!   - Support HEAD method
 //!   - Proper MIME type untuk WASM
+//!
+//! FIX (brotli/gzip pre-compressed):
+//!   - Cek Accept-Encoding dari client request
+//!   - Serve .br atau .gz variant kalau tersedia di disk
+//!   - Set Content-Encoding header yang sesuai
+//!   - Set Vary: Accept-Encoding agar CDN tidak cache salah variant
+//!   - Fallback ke file asli kalau compressed variant tidak ada atau error
 
 use pingora_core::prelude::*;
 use pingora_http::ResponseHeader;
@@ -57,7 +64,21 @@ impl StaticServe {
             return Ok(false);
         }
 
-        let method = session.req_header().method.as_str();
+        // ── Ekstrak semua data dari session sebagai owned types ───────────────
+        // WAJIB dilakukan sebelum operasi async / mutable borrow session berikutnya.
+        // Borrow checker Rust tidak izinkan &str dari session.req_header() hidup
+        // bersamaan dengan &mut session yang dibutuhkan write_response_header().
+        // Solusi: .to_string() / .to_owned() di sini, satu kali, zero runtime cost.
+        let method: String = session.req_header().method.as_str().to_owned();
+        let accept_encoding_raw: String = session
+            .req_header()
+            .headers
+            .get("accept-encoding")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        // Setelah baris ini, tidak ada lagi borrow aktif ke session dari &str di atas.
+
         if method != "GET" && method != "HEAD" {
             return Ok(false);
         }
@@ -101,24 +122,141 @@ impl StaticServe {
             }
         };
 
+        // ── Cek dukungan encoding dari client ─────────────────────────────────
+        // SPA fallback / index.html: jangan compress.
+        // Alasan: index.html harus no-store, kecil, dan fresh setiap request.
+        // Pre-compressed index.html tidak worth overhead kompleksitas.
+        let accept_encoding = if !is_fallback {
+            accept_encoding_raw.as_str()
+        } else {
+            ""
+        };
+
+        let supports_br = accept_encoding.contains("br");
+        let supports_gz = accept_encoding.contains("gzip");
+
+        // ── Resolve pre-compressed variant ───────────────────────────────────
+        // Prioritas: brotli > gzip > raw.
+        // Hanya untuk file asli (bukan SPA fallback/index.html).
+        //
+        // Naming convention Trunk:
+        //   /app_bg.wasm      → raw
+        //   /app_bg.wasm.br   → brotli pre-compressed
+        //   /app_bg.wasm.gz   → gzip pre-compressed
+        //
+        // CATATAN: path adalah path ke file asli (bukan .br/.gz).
+        // MIME type selalu diambil dari file_path asli, bukan serve_path.
+        let (serve_path, content_encoding): (PathBuf, Option<&'static str>) = if !is_fallback {
+            if supports_br {
+                let br_path = PathBuf::from(format!("{}.br", file_path.display()));
+                if fs::metadata(&br_path)
+                    .await
+                    .map(|m| m.is_file())
+                    .unwrap_or(false)
+                {
+                    tracing::debug!(path = %br_path.display(), "serving pre-compressed brotli");
+                    (br_path, Some("br"))
+                } else if supports_gz {
+                    let gz_path = PathBuf::from(format!("{}.gz", file_path.display()));
+                    if fs::metadata(&gz_path)
+                        .await
+                        .map(|m| m.is_file())
+                        .unwrap_or(false)
+                    {
+                        tracing::debug!(path = %gz_path.display(), "serving pre-compressed gzip");
+                        (gz_path, Some("gzip"))
+                    } else {
+                        (file_path.clone(), None)
+                    }
+                } else {
+                    (file_path.clone(), None)
+                }
+            } else if supports_gz {
+                let gz_path = PathBuf::from(format!("{}.gz", file_path.display()));
+                if fs::metadata(&gz_path)
+                    .await
+                    .map(|m| m.is_file())
+                    .unwrap_or(false)
+                {
+                    tracing::debug!(path = %gz_path.display(), "serving pre-compressed gzip");
+                    (gz_path, Some("gzip"))
+                } else {
+                    (file_path.clone(), None)
+                }
+            } else {
+                (file_path.clone(), None)
+            }
+        } else {
+            // SPA fallback / index.html: selalu raw
+            (file_path.clone(), None)
+        };
+
         // ── Baca file ──────────────────────────────────────────────────────────
-        let body = match fs::read(&file_path).await {
+        let body = match fs::read(&serve_path).await {
             Ok(b) => b,
             Err(e) => {
-                tracing::debug!(
-                    requested = %requested.display(),
-                    fallback = %file_path.display(),
-                    "static file tidak ditemukan: {}", e
-                );
-                return Ok(false);
+                // Kalau compressed variant error (race condition / fs issue),
+                // fallback ke file asli — lebih baik slow daripada 404.
+                if content_encoding.is_some() && serve_path != file_path {
+                    tracing::warn!(
+                        compressed = %serve_path.display(),
+                        original   = %file_path.display(),
+                        "compressed variant error, fallback ke file asli: {}", e
+                    );
+                    match fs::read(&file_path).await {
+                        Ok(b) => {
+                            // serve tanpa encoding (fallback ke raw karena compressed error)
+                            return self
+                                .write_response(session, &method, &file_path, b, None, is_fallback)
+                                .await;
+                        }
+                        Err(e2) => {
+                            tracing::debug!(
+                                path = %file_path.display(),
+                                "static file tidak ditemukan: {}", e2
+                            );
+                            return Ok(false);
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        requested = %requested.display(),
+                        fallback  = %file_path.display(),
+                        "static file tidak ditemukan: {}", e
+                    );
+                    return Ok(false);
+                }
             }
         };
 
-        // ── Build response ─────────────────────────────────────────────────────
+        self.write_response(
+            session,
+            &method,
+            &file_path,
+            body,
+            content_encoding,
+            is_fallback,
+        )
+        .await
+    }
+
+    /// Helper: build + write HTTP response ke session.
+    /// file_path = path asli (untuk MIME detection), serve_path bisa .br/.gz.
+    async fn write_response(
+        &self,
+        session: &mut Session,
+        method: &str,
+        file_path: &Path,
+        body: Vec<u8>,
+        content_encoding: Option<&'static str>,
+        is_fallback: bool,
+    ) -> Result<bool> {
+        // MIME selalu dari file asli — bukan dari .br atau .gz
         let mut mime =
             mime_from_path(file_path.to_str().unwrap_or("")).unwrap_or("application/octet-stream");
 
-        // WASM MUST have correct MIME type or browser refuses to instantiate
+        // WASM MUST have correct MIME type or browser refuses to instantiate.
+        // Double-check meski mime_from_path sudah benar — safety net.
         if file_path.extension().map(|e| e == "wasm").unwrap_or(false) {
             mime = "application/wasm";
         }
@@ -127,9 +265,20 @@ impl StaticServe {
         resp.insert_header("content-type", mime)?;
         resp.insert_header("content-length", body.len().to_string())?;
 
+        // Content-Encoding + Vary: hanya saat serve pre-compressed variant.
+        //
+        // Vary: Accept-Encoding WAJIB ada kalau content-encoding di-set.
+        // Tanpa ini: CDN/browser bisa cache brotli response dan serve ke client
+        // yang tidak support brotli → corrupted/garbled content.
+        if let Some(enc) = content_encoding {
+            resp.insert_header("content-encoding", enc)?;
+            resp.insert_header("vary", "accept-encoding")?;
+        }
+
         if is_fallback {
             resp.insert_header("cache-control", "no-cache, no-store, must-revalidate")?;
         } else {
+            // Trunk embed content hash di nama file → immutable safe.
             resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
         }
 
@@ -143,10 +292,11 @@ impl StaticServe {
         }
 
         tracing::debug!(
-            path = %file_path.display(),
+            path     = %file_path.display(),
             fallback = is_fallback,
-            bytes = body.len(),
-            mime = mime,
+            bytes    = body.len(),
+            mime     = mime,
+            encoding = content_encoding.unwrap_or("none"),
             "static served"
         );
 
