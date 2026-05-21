@@ -272,27 +272,56 @@ pub fn apply_response(
     //   CSP sebelumnya: font-src 'self' → blok fonts.gstatic.com.
     //   Fix: tambahkan kedua domain ke directive masing-masing.
     //
+    // BUG FIX (CSP script-src 'unsafe-inline' — ROOT CAUSE blank page via domain):
+    //   CSP sebelumnya: script-src 'self' 'wasm-unsafe-eval' → blok inline <script>.
+    //   Trunk inject <script type="module"> langsung ke index.html saat build.
+    //   Tanpa 'unsafe-inline' di script-src, browser refuse eksekusi inline script tsb.
+    //   Akibat: app tidak pernah init → blank page via domain, WORKS via IP:port (no CSP).
+    //   Fix: tambahkan 'unsafe-inline' ke script-src.
+    //
+    // BUG FIX (CSP/COOP scope — hanya untuk HTML page):
+    //   CSP dan COOP sebelumnya di-set ke SEMUA frontend response termasuk .wasm/.js/.css.
+    //   Browser abaikan CSP pada non-HTML, tapi salah scope → boros bandwidth, membingungkan.
+    //   Fix: CSP + COOP hanya di-set kalau !ctx.is_static (→ index.html / SPA route).
+    //   CORP tetap di-set untuk semua assets (melindungi dari cross-origin embed).
+    //
     // CSP notes:
     //   'wasm-unsafe-eval'  — WASM instantiation, CSP Level 3 (bukan broad 'unsafe-eval')
-    //   'unsafe-inline'     — Leptos/Trunk inject <style> tag di runtime
+    //   'unsafe-inline'     — Trunk inject <script type="module"> DAN <style> tag di runtime.
+    //                         WAJIB ada di script-src, bukan hanya style-src!
+    //                         Tanpa ini: browser blok inline <script> Trunk → app tidak pernah
+    //                         init → blank page via domain (CSP aktif), tapi WORKS via IP:port
+    //                         (tidak ada CSP). Ini root cause utama "domain tidak bisa dibuka".
     //   connect-src         — fetch/WS ke API domain
     if matches!(ctx.route, RouteKind::Static) {
         let api = cfg.api_domain.as_str();
-        let csp = format!(
-            "default-src 'self'; \
-             script-src 'self' 'wasm-unsafe-eval'; \
-             style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-             font-src 'self' https://fonts.gstatic.com; \
-             img-src 'self' data: blob: https://{api}; \
-             connect-src 'self' https://{api} wss://{api}; \
-             object-src 'none'; \
-             base-uri 'self'",
-        );
-        upstream_resp.insert_header("content-security-policy", csp.as_str())?;
-        // COOP: same-origin dipertahankan — isolasi window.opener, tidak break cross-origin.
-        // COEP: DIHAPUS (lihat komentar di atas).
-        upstream_resp.insert_header("cross-origin-opener-policy", "same-origin")?;
-        // CORP untuk aset frontend yang di-embed pihak lain: default same-origin sudah aman.
+
+        // CSP dan COOP hanya relevan untuk HTML page (index.html), bukan untuk
+        // .wasm/.js/.css asset. Browser memang abaikan CSP pada non-HTML resource,
+        // tapi lebih clean dan hemat bandwidth kalau tidak di-set ke asset files.
+        //
+        // is_static=false → route SPA (/, /explore, /events) → upstream serve index.html
+        // is_static=true  → file asset (.wasm, .js, .css, .png, ...) → tidak perlu CSP
+        if !ctx.is_static {
+            let csp = format!(
+                "default-src 'self'; \
+                 script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; \
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+                 font-src 'self' https://fonts.gstatic.com; \
+                 img-src 'self' data: blob: https://{api}; \
+                 connect-src 'self' https://{api} wss://{api}; \
+                 object-src 'none'; \
+                 base-uri 'self'",
+            );
+            upstream_resp.insert_header("content-security-policy", csp.as_str())?;
+            // COOP: same-origin hanya bermakna untuk HTML page (window isolation).
+            // Tidak ada efek pada .wasm/.js response, jadi scope ke is_static=false saja.
+            // COEP: DIHAPUS (lihat komentar di atas).
+            upstream_resp.insert_header("cross-origin-opener-policy", "same-origin")?;
+        }
+
+        // CORP tetap untuk semua frontend assets (is_static=true maupun false):
+        // melindungi resource dari di-embed oleh halaman cross-origin.
         upstream_resp.insert_header("cross-origin-resource-policy", "same-origin")?;
     }
 
