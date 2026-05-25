@@ -54,4 +54,5 @@ dev_origins:
   - "http://77.237.242.1:3100"
   - "http://localhost:5173"
   - "http://localhost:4000"
+  - "https://ulala.space"
   # - "http://127.0.0.1:3000"  # uncomment jika pakai 127.0.0.1 bukan localhost
