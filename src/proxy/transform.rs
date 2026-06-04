@@ -145,23 +145,13 @@ pub fn apply_request(
     }
 
     // ── 2. Host header ────────────────────────────────────────────────────────
-    //
-    // BUG FIX (RustFS image gabisa diakses dari ulala.space):
-    //   Sebelumnya: RustFS3/RustFSUI → Host = client host (mis. "ulala.space").
-    //   RustFS itu S3-compatible dan DEFAULT-nya Path Style (bucket = segmen
-    //   path pertama). Kalau kita kirim Host = "ulala.space" / "image.ulalaapi.store",
-    //   RustFS bisa salah parsing sebagai Virtual-Host Style (nyangka subdomain =
-    //   bucket) atau menolak request karena Host tidak match endpoint-nya.
-    //   Akibat: GET /image/<bucket>/foto.jpg → 403 / NoSuchBucket → image gagal load.
-    //
-    //   Fix: untuk SEMUA upstream (termasuk RustFS), set Host = alamat upstream
-    //   itu sendiri (127.0.0.1:9000). Ini memaksa RustFS pakai Path Style yang
-    //   konsisten — bucket diambil dari path, bukan dari Host.
-    //
-    //   Catatan: domain publik tetap diteruskan via x-forwarded-host (lihat bawah),
-    //   jadi RustFS/SeaweedFS-style signature reconstruction tetap bisa dilakukan
-    //   kalau suatu saat dibutuhkan untuk presigned URL.
-    upstream_req.insert_header("host", ctx.upstream.addr(cfg))?;
+    use crate::upstream::Upstream;
+    // REVIEW FIX: pakai strip_port() yang handle IPv6 dengan benar
+    let host_val = match ctx.upstream {
+        Upstream::RustFS3 | Upstream::RustFSUI => strip_port(&ctx.host),
+        _ => ctx.upstream.addr(cfg),
+    };
+    upstream_req.insert_header("host", host_val)?;
 
     // ── 3. Forwarding headers ─────────────────────────────────────────────────
     let id_buf = ctx.id_hex_buf();
@@ -303,6 +293,16 @@ pub fn apply_response(
     //                         init → blank page via domain (CSP aktif), tapi WORKS via IP:port
     //                         (tidak ada CSP). Ini root cause utama "domain tidak bisa dibuka".
     //   connect-src         — fetch/WS ke API domain
+    //
+    // BUG FIX (image.ulalaapi.store ke-blok CSP — ROOT CAUSE image blank di ulala.space):
+    //   CSP sebelumnya: img-src ... https://{api}  → cuma cover APEX "ulalaapi.store".
+    //   Image disajikan dari SUBDOMAIN "image.ulalaapi.store". Di CSP, host-source
+    //   "https://ulalaapi.store" TIDAK mencakup subdomain-nya. Akibat: browser blok
+    //   semua <img> ke image.ulalaapi.store secara diam-diam → gambar blank, padahal
+    //   request-nya valid (akses langsung ke URL-nya jalan normal).
+    //   Fix: tambahkan "https://*.{api}" ke img-src (cover image. & ui. subdomain).
+    //   connect-src juga ditambah "https://*.{api}" untuk antisipasi upload/XHR
+    //   langsung ke subdomain S3 (story/event image upload).
     if matches!(ctx.route, RouteKind::Static) {
         let api = cfg.api_domain.as_str();
 
@@ -318,8 +318,8 @@ pub fn apply_response(
                  script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; \
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src 'self' https://fonts.gstatic.com; \
-                 img-src 'self' data: blob: https://{api}; \
-                 connect-src 'self' https://{api} wss://{api}; \
+                 img-src 'self' data: blob: https://{api} https://*.{api}; \
+                 connect-src 'self' https://{api} https://*.{api} wss://{api}; \
                  object-src 'none'; \
                  base-uri 'self'",
             );
