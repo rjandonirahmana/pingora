@@ -20,6 +20,7 @@ pub enum Upstream {
     /// RustFS S3 Storage (:9000)
     ///   - via subdomain image.ulalaapi.store/* (no strip)
     ///   - via path ulalaapi.store/image/* (strip "/image" prefix, handled di proxy.rs)
+    ///   - via path ulala.space/image/* (strip "/image" prefix, handled di proxy.rs)
     RustFS3,
     /// RustFS Web Console (:9001) — via subdomain ui.ulalaapi.store
     RustFSUI,
@@ -29,46 +30,65 @@ impl Upstream {
     /// Tentukan upstream dari Host request dan path.
     ///
     /// Aturan (first-match):
-    ///  1. Host = web_domain              → Frontend (semua path)
-    ///  2. Host = image_subdomain         → RustFS3 (S3 storage via subdomain)
-    ///  3. Host = ui_subdomain            → RustFSUI (Console via subdomain)
-    ///  4. Host = api_domain + /image/*   → RustFS3 (backward compat, path-based)
-    ///  5. Host = api_domain + /api/*     → Backend (REST & WebSocket)
-    ///  6. Host = api_domain              → Backend (fallback)
+    ///  1. Host = web_domain + /api/ws/*   → Backend (WebSocket)
+    ///  2. Host = web_domain + /api/*       → Backend (REST)
+    ///  3. Host = web_domain + /image/*   → RustFS3 (path-based, strip di proxy.rs)
+    ///  4. Host = web_domain               → Frontend (semua path lain)
+    ///  5. Host = image_subdomain          → RustFS3 (S3 storage via subdomain)
+    ///  6. Host = ui_subdomain             → RustFSUI (Console via subdomain)
+    ///  7. Host = api_domain + /image/*    → RustFS3 (backward compat, path-based)
+    ///  8. Host = api_domain + /api/*      → Backend (REST & WebSocket)
+    ///  9. Host = api_domain               → Backend (fallback)
     pub fn for_request(host: &str, path: &str, cfg: &Config) -> Self {
         let host_bare = host.split(':').next().unwrap_or(host);
 
-        // 1. Frontend (ulala.space)
+        // 1-4. Web domain (ulala.space)
         let is_web = is_domain_match(host_bare, &cfg.web_domain);
         if is_web {
-            return Upstream::Frontend;
-        }
-
-        // 2. RustFS S3 via subdomain (image.ulalaapi.store)
-        if host_bare == cfg.image_subdomain {
-            return Upstream::RustFS3;
-        }
-
-        // 3. RustFS Console via subdomain (ui.ulalaapi.store)
-        if host_bare == cfg.ui_subdomain {
-            return Upstream::RustFSUI;
-        }
-
-        // 4-6. API domain (ulalaapi.store)
-        let is_api = is_domain_match(host_bare, &cfg.api_domain);
-
-        if is_api {
-            // Backward compat: /image/* → RustFS3 (strip akan dilakukan di proxy.rs)
-            if path.starts_with("/image/") || path == "/image" {
-                return Upstream::RustFS3;
+            // 1. WebSocket
+            if Self::is_ws_path(path) {
+                return Upstream::Backend;
             }
 
-            // REST API & WebSocket
+            // 2. REST API
             if path.starts_with("/api/") || path == "/api" {
                 return Upstream::Backend;
             }
 
-            // Fallback api domain → Backend
+            // 3. Image / S3 path-based — same-domain image serving
+            if path.starts_with("/image/") || path == "/image" {
+                return Upstream::RustFS3;
+            }
+
+            // 4. Fallback: Frontend (SPA / static)
+            return Upstream::Frontend;
+        }
+
+        // 5. RustFS S3 via subdomain (image.ulalaapi.store)
+        if host_bare == cfg.image_subdomain {
+            return Upstream::RustFS3;
+        }
+
+        // 6. RustFS Console via subdomain (ui.ulalaapi.store)
+        if host_bare == cfg.ui_subdomain {
+            return Upstream::RustFSUI;
+        }
+
+        // 7-9. API domain (ulalaapi.store)
+        let is_api = is_domain_match(host_bare, &cfg.api_domain);
+
+        if is_api {
+            // 7. Backward compat: /image/* → RustFS3 (strip akan dilakukan di proxy.rs)
+            if path.starts_with("/image/") || path == "/image" {
+                return Upstream::RustFS3;
+            }
+
+            // 8. REST API & WebSocket
+            if path.starts_with("/api/") || path == "/api" {
+                return Upstream::Backend;
+            }
+
+            // 9. Fallback api domain → Backend
             return Upstream::Backend;
         }
 
@@ -99,7 +119,6 @@ fn is_domain_match(host: &str, domain: &str) -> bool {
     host == domain
         || (host.len() == domain.len() + 4 && host.starts_with("www.") && host.ends_with(domain))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn web_domain_always_frontend() {
+    fn web_domain_frontend_routes() {
         let cfg = test_cfg();
         assert_eq!(
             Upstream::for_request("ulala.space", "/", &cfg),
@@ -130,8 +149,56 @@ mod tests {
             Upstream::Frontend
         );
         assert_eq!(
-            Upstream::for_request("www.ulala.space", "/api/", &cfg),
+            Upstream::for_request("www.ulala.space", "/explore", &cfg),
             Upstream::Frontend
+        );
+    }
+
+    // ── web_domain exception tests (konsisten dengan router.rs) ───────────────
+
+    #[test]
+    fn web_domain_api_routes_to_backend() {
+        let cfg = test_cfg();
+        assert_eq!(
+            Upstream::for_request("ulala.space", "/api/orders", &cfg),
+            Upstream::Backend,
+            "/api/* di web_domain harus ke Backend"
+        );
+        assert_eq!(
+            Upstream::for_request("ulala.space", "/api/auth/login", &cfg),
+            Upstream::Backend
+        );
+    }
+
+    #[test]
+    fn web_domain_ws_routes_to_backend() {
+        let cfg = test_cfg();
+        assert_eq!(
+            Upstream::for_request("ulala.space", "/api/ws/chat", &cfg),
+            Upstream::Backend,
+            "/api/ws/* di web_domain harus ke Backend"
+        );
+        assert_eq!(
+            Upstream::for_request("www.ulala.space", "/api/ws/", &cfg),
+            Upstream::Backend
+        );
+    }
+
+    #[test]
+    fn web_domain_image_routes_to_rustfs3() {
+        let cfg = test_cfg();
+        assert_eq!(
+            Upstream::for_request("ulala.space", "/image/photo.jpg", &cfg),
+            Upstream::RustFS3,
+            "/image/* di web_domain harus ke RustFS3"
+        );
+        assert_eq!(
+            Upstream::for_request("ulala.space", "/image/bucket/file.png", &cfg),
+            Upstream::RustFS3
+        );
+        assert_eq!(
+            Upstream::for_request("www.ulala.space", "/image/", &cfg),
+            Upstream::RustFS3
         );
     }
 
@@ -213,6 +280,14 @@ mod tests {
         assert_eq!(
             Upstream::for_request("ulala.space:443", "/", &cfg),
             Upstream::Frontend
+        );
+        assert_eq!(
+            Upstream::for_request("ulala.space:443", "/api/me", &cfg),
+            Upstream::Backend
+        );
+        assert_eq!(
+            Upstream::for_request("ulala.space:443", "/image/photo.jpg", &cfg),
+            Upstream::RustFS3
         );
         assert_eq!(
             Upstream::for_request("image.ulalaapi.store:443", "/mybucket/file.jpg", &cfg),

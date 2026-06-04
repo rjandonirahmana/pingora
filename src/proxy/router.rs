@@ -69,6 +69,17 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
             };
         }
 
+        // ⬇️⬇️⬇️ TAMBAH INI ⬇️⬇️⬇️
+        if path.starts_with("/image/") || path == "/image" {
+            return RouteDecision {
+                upstream: Upstream::RustFS3,
+                strip_prefix: Some("/image"), // strip "/image" agar path ke S3 bersih
+                is_ws: false,
+                is_static: false,
+            };
+        }
+        // ⬆️⬆️⬆️ TAMBAH INI ⬆️⬆️⬆️
+
         // Semua path lain → SPA / static asset
         return RouteDecision {
             upstream: Upstream::Frontend,
@@ -351,5 +362,18 @@ mod tests {
             assert_eq!(a.upstream, b.upstream);
             assert_eq!(a.is_ws, b.is_ws);
         }
+    }
+
+    #[test]
+    fn web_domain_image_strip() {
+        let c = cfg();
+        let d = route("ulala.space", "/image/bucket/photo.jpg", &c);
+        assert_eq!(
+            d.upstream,
+            Upstream::RustFS3,
+            "/image/* di web_domain harus ke RustFS3"
+        );
+        assert_eq!(d.strip_prefix, Some("/image"));
+        assert!(!d.is_static);
     }
 }
