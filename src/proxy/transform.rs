@@ -145,13 +145,23 @@ pub fn apply_request(
     }
 
     // ── 2. Host header ────────────────────────────────────────────────────────
-    use crate::upstream::Upstream;
-    // REVIEW FIX: pakai strip_port() yang handle IPv6 dengan benar
-    let host_val = match ctx.upstream {
-        Upstream::RustFS3 | Upstream::RustFSUI => strip_port(&ctx.host),
-        _ => ctx.upstream.addr(cfg),
-    };
-    upstream_req.insert_header("host", host_val)?;
+    //
+    // BUG FIX (RustFS image gabisa diakses dari ulala.space):
+    //   Sebelumnya: RustFS3/RustFSUI → Host = client host (mis. "ulala.space").
+    //   RustFS itu S3-compatible dan DEFAULT-nya Path Style (bucket = segmen
+    //   path pertama). Kalau kita kirim Host = "ulala.space" / "image.ulalaapi.store",
+    //   RustFS bisa salah parsing sebagai Virtual-Host Style (nyangka subdomain =
+    //   bucket) atau menolak request karena Host tidak match endpoint-nya.
+    //   Akibat: GET /image/<bucket>/foto.jpg → 403 / NoSuchBucket → image gagal load.
+    //
+    //   Fix: untuk SEMUA upstream (termasuk RustFS), set Host = alamat upstream
+    //   itu sendiri (127.0.0.1:9000). Ini memaksa RustFS pakai Path Style yang
+    //   konsisten — bucket diambil dari path, bukan dari Host.
+    //
+    //   Catatan: domain publik tetap diteruskan via x-forwarded-host (lihat bawah),
+    //   jadi RustFS/SeaweedFS-style signature reconstruction tetap bisa dilakukan
+    //   kalau suatu saat dibutuhkan untuk presigned URL.
+    upstream_req.insert_header("host", ctx.upstream.addr(cfg))?;
 
     // ── 3. Forwarding headers ─────────────────────────────────────────────────
     let id_buf = ctx.id_hex_buf();
