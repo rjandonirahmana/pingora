@@ -300,9 +300,12 @@ pub fn apply_response(
     //   "https://ulalaapi.store" TIDAK mencakup subdomain-nya. Akibat: browser blok
     //   semua <img> ke image.ulalaapi.store secara diam-diam → gambar blank, padahal
     //   request-nya valid (akses langsung ke URL-nya jalan normal).
-    //   Fix: tambahkan "https://*.{api}" ke img-src (cover image. & ui. subdomain).
-    //   connect-src juga ditambah "https://*.{api}" untuk antisipasi upload/XHR
-    //   langsung ke subdomain S3 (story/event image upload).
+    //   Fix: img-src pakai "https:" (izinkan SEMUA image HTTPS) supaya image dari
+    //   RustFS subdomain DAN sumber luar (avatar OAuth, CDN eksternal, gambar event
+    //   dari luar) sama-sama kebuka. img-src relatif low-risk: image tidak bisa
+    //   eksekusi script. Kalau mau lebih ketat, ganti "https:" jadi daftar domain
+    //   eksplisit, mis: https://*.{api} https://lh3.googleusercontent.com ...
+    //   connect-src tetap dibatasi ke API domain + subdomainnya (lebih sensitif).
     if matches!(ctx.route, RouteKind::Static) {
         let api = cfg.api_domain.as_str();
 
@@ -318,7 +321,7 @@ pub fn apply_response(
                  script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; \
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src 'self' https://fonts.gstatic.com; \
-                 img-src 'self' data: blob: https://{api} https://*.{api}; \
+                 img-src 'self' data: blob: https:; \
                  connect-src 'self' https://{api} https://*.{api} wss://{api}; \
                  object-src 'none'; \
                  base-uri 'self'",

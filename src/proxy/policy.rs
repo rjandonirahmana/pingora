@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 
+use crate::config::Config;
 use crate::proxy::context::RequestCtx;
 
 // Hard cap jumlah IP di rate limiter — cegah OOM saat DDoS IP spoofing.
@@ -273,9 +274,124 @@ impl PolicyLayer {
     }
 }
 
+// ─── Hotlink protection (Referer allowlist) ──────────────────────────────────
+//
+// Tujuan: image RustFS hanya boleh di-embed/diakses dari domain kita sendiri.
+// Mekanisme: cek header `Referer` request. Karena Referrer-Policy kita
+// "strict-origin-when-cross-origin", embed sah dari ulala.space ke
+// image.ulalaapi.store TETAP mengirim Referer "https://ulala.space/", jadi
+// embed sah lolos, sedangkan embed dari domain lain ketahuan & ditolak.
+//
+// CATATAN PENTING (jujur soal batasannya):
+//   - Ini hotlink protection, BUKAN keamanan sungguhan. Referer bisa dipalsukan
+//     (attacker set "Referer: https://ulala.space" manual) atau di-strip
+//     (<img referrerpolicy="no-referrer">). Cukup untuk cegah hotlink kasual &
+//     pencurian bandwidth, TIDAK cukup untuk melindungi konten rahasia.
+//   - Untuk proteksi nyata: pakai presigned/signed URL yang expire.
+
+// Toggle: kalau true, request TANPA Referer diizinkan (mis. akses URL langsung
+// di address bar, webview tertentu, sebagian browser privacy). Kalau false,
+// request tanpa Referer ikut DITOLAK (mode strict — "benar-benar cuma dari
+// halaman kita"), tapi akses URL langsung jadi 403.
+const ALLOW_EMPTY_REFERER: bool = true;
+
+/// Ekstrak host dari sebuah URL/Referer tanpa alokasi.
+/// "https://ulala.space/foo?x=1" → Some("ulala.space")
+fn url_host(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host_port = after_scheme.split(['/', '?', '#']).next()?;
+    // buang userinfo "user:pass@host" → ambil setelah '@' terakhir
+    let host_port = host_port.rsplit('@').next()?;
+    // buang port → ambil sebelum ':' (aman untuk hostname biasa, bukan IPv6 literal)
+    let host = host_port.split(':').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// True kalau `host` adalah subdomain dari `parent` (zero-alloc).
+/// is_subdomain_of("image.ulalaapi.store", "ulalaapi.store") == true
+fn is_subdomain_of(host: &str, parent: &str) -> bool {
+    host.len() > parent.len() + 1
+        && host.ends_with(parent)
+        && host.as_bytes()[host.len() - parent.len() - 1] == b'.'
+}
+
+/// True kalau Referer berasal dari domain kita (boleh akses image).
+/// `referer` = nilai header Referer (None jika tidak ada).
+pub fn referer_allowed(referer: Option<&str>, cfg: &Config) -> bool {
+    let referer = match referer {
+        Some(r) => r,
+        None => return ALLOW_EMPTY_REFERER,
+    };
+
+    let host = match url_host(referer) {
+        Some(h) => h,
+        None => return false, // Referer ada tapi malformed → tolak
+    };
+
+    let web = cfg.web_domain.as_str(); // mis. "ulala.space"
+    let api = cfg.api_domain.as_str(); // mis. "ulalaapi.store"
+
+    // Apex domain kita
+    if host == web || host == api {
+        return true;
+    }
+    // Subdomain domain kita (www.ulala.space, image.ulalaapi.store, ui.ulalaapi.store)
+    if is_subdomain_of(host, web) || is_subdomain_of(host, api) {
+        return true;
+    }
+    // Origin dev / cors yang sudah di-whitelist (mis. http://localhost:3100,
+    // http://77.237.242.1:3100) — supaya dev environment tidak ke-blok.
+    for origin in cfg.dev_origins.iter().chain(cfg.cors_origins.iter()) {
+        if url_host(origin) == Some(host) {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+// ─── Tests: hotlink referer parsing ───────────────────────────────────────────
+#[cfg(test)]
+mod hotlink_tests {
+    use super::{is_subdomain_of, url_host};
+
+    #[test]
+    fn url_host_extraction() {
+        assert_eq!(
+            url_host("https://ulala.space/explore?x=1"),
+            Some("ulala.space")
+        );
+        assert_eq!(
+            url_host("https://image.ulalaapi.store/a/b.jpg"),
+            Some("image.ulalaapi.store")
+        );
+        assert_eq!(url_host("http://localhost:3100/"), Some("localhost"));
+        assert_eq!(url_host("https://user:pass@evil.com/x"), Some("evil.com"));
+        assert_eq!(url_host("https://host:8443"), Some("host"));
+        assert_eq!(url_host("garbage"), Some("garbage"));
+        assert_eq!(url_host("https://"), None);
+    }
+
+    #[test]
+    fn subdomain_matching_rejects_spoof() {
+        // sah
+        assert!(is_subdomain_of("image.ulalaapi.store", "ulalaapi.store"));
+        assert!(is_subdomain_of("www.ulala.space", "ulala.space"));
+        // spoof: HARUS ditolak
+        assert!(!is_subdomain_of("ulala.space.evil.com", "ulala.space"));
+        assert!(!is_subdomain_of("notulalaapi.store", "ulalaapi.store"));
+        assert!(!is_subdomain_of("ulalaapi.store", "ulalaapi.store")); // apex, bukan subdomain
+        assert!(!is_subdomain_of("xulalaapi.store", "ulalaapi.store"));
+    }
 }

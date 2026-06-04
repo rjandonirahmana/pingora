@@ -151,6 +151,40 @@ impl ProxyHttp for KineticProxy {
             }
         }
 
+        // ── Hotlink protection ─────────────────────────────────────────────────
+        // Image RustFS (is_object) cuma boleh diakses/di-embed dari domain kita.
+        // Dashboard RustFSUI (Dashboard) DIKECUALIKAN — itu punya auth sendiri.
+        // Referer dibaca hanya untuk object request (hindari alloc di jalur umum).
+        if ctx.is_object {
+            let allowed = {
+                let referer = session
+                    .req_header()
+                    .headers
+                    .get("referer")
+                    .and_then(|v| v.to_str().ok());
+                policy::referer_allowed(referer, &self.state.cfg)
+            }; // borrow Referer berakhir di sini, sebelum mutable session di bawah
+
+            if !allowed {
+                tracing::warn!(
+                    id = ctx.id,
+                    host = %ctx.host,
+                    path = %ctx.path,
+                    "hotlink blocked (referer bukan domain kita)"
+                );
+                let mut resp = ResponseHeader::build(http::StatusCode::FORBIDDEN, None)?;
+                resp.insert_header("content-type", "text/plain")?;
+                resp.insert_header("content-length", "9")?;
+                resp.insert_header("x-served-by", "kinetic-proxy")?;
+                resp.insert_header("cache-control", "no-store")?;
+                session.write_response_header(Box::new(resp), false).await?;
+                session
+                    .write_response_body(Some(bytes::Bytes::from_static(b"Forbidden")), true)
+                    .await?;
+                return Ok(true);
+            }
+        }
+
         tracing::debug!(
             id       = ctx.id,
             method   = %method,
