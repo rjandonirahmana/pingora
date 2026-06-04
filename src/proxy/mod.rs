@@ -510,6 +510,19 @@ pub fn build_proxy_service(
         let mut tls = pingora_core::listeners::tls::TlsSettings::intermediate(cert_web, key_web)
             .expect("Gagal load TLS cert web — cek path di config.yaml");
 
+        // ── HTTP/2 untuk domain web (ulala.space) ──────────────────────────────
+        // Set ALPN "h2,http/1.1" di listener web. Ini yang bikin lazy WASM chunk
+        // kamu ter-multiplex dalam 1 koneksi (tidak kena limit 6-koneksi & HOL h1).
+        // SELURUH keuntungan WASM ada di domain ini.
+        //
+        // CATATAN WEBSOCKET (wajib test):
+        //   FE kamu pakai wss://ulala.space/api/ws → lewat listener ini.
+        //   WS adalah HTTP/1.1 Upgrade. Browser modern membuka koneksi h1 terpisah
+        //   untuk WS walau ALPN menawarkan h2 (Pingora tidak meng-advertise
+        //   SETTINGS_ENABLE_CONNECT_PROTOCOL), jadi normalnya chat tetap jalan.
+        //   ROLLBACK 1 baris kalau chat putus: comment baris enable_h2() di bawah.
+        tls.enable_h2();
+
         if let (Some(cert_api), Some(key_api)) = (cfg.tls_cert_api.clone(), cfg.tls_key_api.clone())
         {
             if std::path::Path::new(&cert_api).exists() && std::path::Path::new(&key_api).exists() {
@@ -522,6 +535,24 @@ pub fn build_proxy_service(
                 api_builder
                     .set_private_key_file(&key_api, SslFiletype::PEM)
                     .expect("key API");
+
+                // ── (OPSIONAL) HTTP/2 untuk domain API (ulalaapi.store) ─────────
+                // Default: DIMATIKAN. API domain tetap h1.
+                // Alasan: keuntungan h2 di REST kecil, tapi nambah risiko untuk
+                //   WS yang juga lewat ulalaapi.store/api/ws. Image/REST/WS kamu
+                //   sudah terbukti jalan di h1 → jangan diutak-atik tanpa alasan.
+                //
+                // Aktifkan HANYA kalau kamu benar-benar butuh multiplexing di API
+                // domain DAN sudah test WS chat lewat domain ini. Caranya:
+                // uncomment blok di bawah (imports-nya self-contained di sini).
+                //
+                // use openssl::ssl::{select_next_proto, AlpnError};
+                // api_builder.set_alpn_select_callback(|_ssl, client| {
+                //     // Prioritas h2, fallback http/1.1. Wire format: len-prefixed.
+                //     select_next_proto(b"\x02h2\x08http/1.1", client)
+                //         .ok_or(AlpnError::NOACK)
+                // });
+
                 let api_ctx = api_builder.build().into_context();
 
                 // Pre-compute SNI strings sekali saat startup — zero alloc per handshake.

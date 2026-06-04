@@ -18,6 +18,7 @@ use pingora_core::prelude::*;
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 use tokio::fs;
 
 use crate::proxy::transform::mime_from_path;
@@ -132,8 +133,12 @@ impl StaticServe {
             ""
         };
 
-        let supports_br = accept_encoding.contains("br");
-        let supports_gz = accept_encoding.contains("gzip");
+        // Patch B: parsing Accept-Encoding yang robust + hormati q=0.
+        // Tokenize per koma, ambil token sebelum ';', bandingkan exact (case-insensitive).
+        // Menghindari false-match substring (mis. "unbr", "compressbr") dan
+        // mendukung "br;q=0" yang berarti client justru men-disable brotli.
+        let supports_br = accepts(accept_encoding, "br");
+        let supports_gz = accepts(accept_encoding, "gzip");
 
         // ── Resolve pre-compressed variant ───────────────────────────────────
         // Prioritas: brotli > gzip > raw.
@@ -251,6 +256,61 @@ impl StaticServe {
         content_encoding: Option<&'static str>,
         is_fallback: bool,
     ) -> Result<bool> {
+        // ── ETag dari metadata file ASLI (size + mtime) ───────────────────────
+        // Weak ETag: W/"size-mtime". Murah (tidak hash konten), dan karena
+        // berbasis file asli ia representation-independent — cocok dipakai
+        // lintas variant br/gz/raw (konten ter-decode identik).
+        // Tidak di-generate untuk SPA fallback (index.html no-store, percuma).
+        let etag: Option<String> = if is_fallback {
+            None
+        } else {
+            fs::metadata(file_path).await.ok().and_then(|m| {
+                let size = m.len();
+                let mtime = m
+                    .modified()
+                    .ok()?
+                    .duration_since(UNIX_EPOCH)
+                    .ok()?
+                    .as_secs();
+                Some(format!(r#"W/"{size}-{mtime}""#))
+            })
+        };
+
+        // ── 304 Not Modified ──────────────────────────────────────────────────
+        // Berlaku untuk GET dan HEAD (keduanya conditional request yang valid).
+        // Ekstrak If-None-Match jadi owned dulu supaya borrow immutable session
+        // selesai sebelum write_response_header() butuh &mut.
+        let if_none_match: Option<String> = session
+            .req_header()
+            .headers
+            .get("if-none-match")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+
+        let etag_matches = match (&etag, &if_none_match) {
+            (Some(tag), Some(inm)) => {
+                inm.trim() == "*" || inm.split(',').any(|t| t.trim() == tag.as_str())
+            }
+            _ => false,
+        };
+
+        if etag_matches {
+            let mut resp = ResponseHeader::build(304, None)?;
+            if let Some(ref tag) = etag {
+                resp.insert_header("etag", tag.as_str())?;
+            }
+            resp.insert_header(
+                "cache-control",
+                "public, max-age=31536000, immutable, stale-while-revalidate=86400",
+            )?;
+            if content_encoding.is_some() {
+                resp.insert_header("vary", "accept-encoding")?;
+            }
+            session.write_response_header(Box::new(resp), true).await?;
+            tracing::debug!(path = %file_path.display(), "304 Not Modified (etag match)");
+            return Ok(true);
+        }
+
         // MIME selalu dari file asli — bukan dari .br atau .gz
         let mut mime =
             mime_from_path(file_path.to_str().unwrap_or("")).unwrap_or("application/octet-stream");
@@ -261,9 +321,16 @@ impl StaticServe {
             mime = "application/wasm";
         }
 
+        // Simpan len SEBELUM body di-move ke Bytes (dipakai content-length + tracing).
+        let body_len = body.len();
+
         let mut resp = ResponseHeader::build(200, None)?;
         resp.insert_header("content-type", mime)?;
-        resp.insert_header("content-length", body.len().to_string())?;
+        resp.insert_header("content-length", body_len.to_string())?;
+
+        if let Some(ref tag) = etag {
+            resp.insert_header("etag", tag.as_str())?;
+        }
 
         // Content-Encoding + Vary: hanya saat serve pre-compressed variant.
         //
@@ -279,22 +346,29 @@ impl StaticServe {
             resp.insert_header("cache-control", "no-cache, no-store, must-revalidate")?;
         } else {
             // Trunk embed content hash di nama file → immutable safe.
-            resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
+            // stale-while-revalidate beri grace window untuk intermediary cache.
+            resp.insert_header(
+                "cache-control",
+                "public, max-age=31536000, immutable, stale-while-revalidate=86400",
+            )?;
         }
 
         if method == "HEAD" {
             session.write_response_header(Box::new(resp), true).await?;
         } else {
             session.write_response_header(Box::new(resp), false).await?;
+            // FIX: zero-copy. Bytes::from(Vec) reuse backing allocation Vec
+            // tanpa memcpy — tidak ada lagi body.clone() yang menggandakan
+            // 5–15 MB WASM di heap per request.
             session
-                .write_response_body(Some(bytes::Bytes::from(body.clone())), true)
+                .write_response_body(Some(bytes::Bytes::from(body)), true)
                 .await?;
         }
 
         tracing::debug!(
             path     = %file_path.display(),
             fallback = is_fallback,
-            bytes    = body.len(),
+            bytes    = body_len,
             mime     = mime,
             encoding = content_encoding.unwrap_or("none"),
             "static served"
@@ -302,4 +376,32 @@ impl StaticServe {
 
         Ok(true)
     }
+}
+
+/// Cek apakah client menerima suatu content-coding, menghormati `q=0` (disable).
+///
+/// Parsing token-aware: pisah per koma, ambil bagian sebelum ';', bandingkan
+/// exact & case-insensitive. `gzip` juga match alias `x-gzip`.
+/// `br;q=0` / `gzip;q=0` dianggap TIDAK didukung (client men-disable secara eksplisit).
+fn accepts(accept_encoding: &str, target: &str) -> bool {
+    accept_encoding.split(',').any(|part| {
+        let mut it = part.split(';');
+        let token = it.next().unwrap_or("").trim();
+
+        let token_matches = token.eq_ignore_ascii_case(target)
+            || (target == "gzip" && token.eq_ignore_ascii_case("x-gzip"));
+        if !token_matches {
+            return false;
+        }
+
+        // Periksa parameter q — q=0 berarti encoding ditolak.
+        for param in it {
+            if let Some(q) = param.trim().strip_prefix("q=") {
+                if let Ok(qv) = q.trim().parse::<f32>() {
+                    return qv > 0.0;
+                }
+            }
+        }
+        true
+    })
 }
