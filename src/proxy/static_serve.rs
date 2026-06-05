@@ -303,7 +303,8 @@ impl StaticServe {
                 "cache-control",
                 "public, max-age=31536000, immutable, stale-while-revalidate=86400",
             )?;
-            if content_encoding.is_some() {
+            if let Some(enc) = content_encoding {
+                resp.insert_header("content-encoding", enc)?;
                 resp.insert_header("vary", "accept-encoding")?;
             }
             session.write_response_header(Box::new(resp), true).await?;
@@ -326,7 +327,9 @@ impl StaticServe {
 
         let mut resp = ResponseHeader::build(200, None)?;
         resp.insert_header("content-type", mime)?;
-        resp.insert_header("content-length", body_len.to_string())?;
+        // Zero-alloc content-length via itoa (konsisten dgn pemakaian itoa di reject()).
+        let mut len_buf = itoa::Buffer::new();
+        resp.insert_header("content-length", len_buf.format(body_len))?;
 
         if let Some(ref tag) = etag {
             resp.insert_header("etag", tag.as_str())?;
