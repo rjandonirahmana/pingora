@@ -22,6 +22,10 @@ use crate::proxy::context::RequestCtx;
 // 100k entry × ~64 bytes/entry ≈ 6.4MB max.
 const MAX_BUCKETS: usize = 100_000;
 
+// Saat tabel penuh, bucket yang idle melebihi ambang ini di-evict inline agar
+// IP baru yang sah tidak ke-lockout sampai cleanup periodik (1 jam) berjalan.
+const EVICT_IDLE_SECS: u64 = 300; // 5 menit
+
 // ─── PolicyError ─────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -129,13 +133,27 @@ impl RateLimiter {
             };
         }
 
-        // Slow path: IP baru — cek cap dulu sebelum insert
+        // Slow path: IP baru — cek cap dulu sebelum insert.
         if self.buckets.len() >= MAX_BUCKETS {
-            // Bucket penuh → tolak request daripada leak memory.
-            // Ini correct behavior saat DDoS: semua IP baru di-rate-limit.
-            return Err(PolicyError::RateLimited {
-                retry_after_secs: 60,
-            });
+            // Tabel penuh. Sebelum menolak, coba evict bucket yang sudah idle
+            // beberapa menit (bukan menunggu cleanup periodik yang ambangnya 1 jam).
+            // Ini menahan kasus umum: tabel terisi burst sesaat lalu IP-nya pergi —
+            // tanpa eviction, slot mereka mengunci IP baru yang sah selama 1 jam.
+            //
+            // CATATAN JUJUR soal batas efektivitas:
+            //   - Ini BUKAN obat DDoS. Kalau 100k bucket semuanya AKTIF (tiap IP
+            //     terus mengirim), tidak ada yang idle → tidak ada yang ter-evict →
+            //     IP baru tetap ditolak. Itu memang perilaku yang benar saat flood.
+            //   - Source IP TCP tidak bisa di-spoof (handshake harus selesai), jadi
+            //     mengisi 100k bucket butuh 100k IP nyata (botnet), bukan spoofing.
+            self.evict_stale(EVICT_IDLE_SECS);
+
+            if self.buckets.len() >= MAX_BUCKETS {
+                // Masih penuh setelah eviction → flood IP aktif. Tolak (lindungi memory).
+                return Err(PolicyError::RateLimited {
+                    retry_after_secs: 60,
+                });
+            }
         }
 
         let bucket = Arc::new(Bucket::new(self.capacity));
@@ -144,20 +162,26 @@ impl RateLimiter {
         Ok(())
     }
 
-    /// Hapus bucket yang tidak aktif > 1 jam.
-    /// Dipanggil periodik oleh scheduler di build_proxy_service().
-    pub fn cleanup(&self) {
-        let cutoff = now_secs().saturating_sub(3600);
+    /// Hapus bucket yang idle lebih lama dari `idle_secs`. Return jumlah yang dihapus.
+    /// Dipakai oleh cleanup periodik (idle 1 jam) dan eviction inline saat tabel
+    /// penuh (idle 5 menit).
+    fn evict_stale(&self, idle_secs: u64) -> usize {
+        let cutoff = now_secs().saturating_sub(idle_secs);
         let before = self.buckets.len();
         self.buckets
             .retain(|_, bucket| bucket.last_refill.load(Ordering::Relaxed) > cutoff);
-        let after = self.buckets.len();
-        if before != after {
+        before - self.buckets.len()
+    }
+
+    /// Hapus bucket yang tidak aktif > 1 jam.
+    /// Dipanggil periodik oleh scheduler di build_proxy_service().
+    pub fn cleanup(&self) {
+        let removed = self.evict_stale(3600);
+        if removed > 0 {
             tracing::info!(
-                "Rate limiter cleanup: {} → {} active IPs (removed {})",
-                before,
-                after,
-                before - after
+                "Rate limiter cleanup: removed {} idle IPs, {} active",
+                removed,
+                self.buckets.len()
             );
         }
     }

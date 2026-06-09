@@ -4,22 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pingora = { version = "0.8.0", features = ["lb", "openssl"] }
-pingora-core = "0.8.0"
-pingora-http = "0.8.0"
-pingora-proxy = "0.8.0"
+pingora = { version = "0.8.1", features = ["lb", "openssl"] }
+pingora-core = "0.8.1"
+pingora-http = "0.8.1"
+pingora-proxy = "0.8.1"
 async-trait = "0.1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.52.3", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
-openssl = "0.10"
-http = "1"
+openssl = "0.10.80"
+http = "1.4.2"
 smol_str = "0.3"
 itoa = "1"
-dashmap = "6"
+dashmap = "6.2.1"
 
 [[bin]]
 name = "kinetic-proxy"

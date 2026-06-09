@@ -79,6 +79,28 @@ pub struct Config {
 
     #[serde(default)]
     pub frontend_dist_path: Option<String>,
+
+    // ── Derived (bukan dari YAML) ─────────────────────────────────────────────
+    /// CSP header yang sudah jadi, dibangun sekali saat load() dari api_domain.
+    /// Menghindari format!() ~300B per navigasi HTML di transform.rs.
+    /// #[serde(skip)] → tidak dibaca/ditulis YAML; diisi manual setelah parse.
+    #[serde(skip)]
+    pub csp_header: String,
+}
+
+/// Bangun string CSP dari api_domain. Dipanggil sekali saat startup.
+pub fn build_csp_header(api_domain: &str) -> String {
+    format!(
+        "default-src 'self'; \
+         script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; \
+         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+         font-src 'self' https://fonts.gstatic.com; \
+         img-src 'self' data: blob: https:; \
+         connect-src 'self' https://{api} https://*.{api} wss://{api}; \
+         object-src 'none'; \
+         base-uri 'self'",
+        api = api_domain,
+    )
 }
 
 impl Config {
@@ -128,7 +150,10 @@ impl Config {
             cfg.rate_limit_rps = v.parse().unwrap_or(cfg.rate_limit_rps);
         }
 
-        // 3. Validasi — log WARNING jelas jika TLS bermasalah
+        // 3. Precompute CSP — setelah env override agar pakai api_domain final.
+        cfg.csp_header = build_csp_header(&cfg.api_domain);
+
+        // 4. Validasi — log WARNING jelas jika TLS bermasalah
         cfg.validate();
         cfg
     }
@@ -215,6 +240,7 @@ impl Default for Config {
             image_subdomain: default_image_subdomain(),
             ui_subdomain: default_ui_subdomain(),
             frontend_dist_path: None,
+            csp_header: build_csp_header(&default_api_domain()),
         }
     }
 }

@@ -10,7 +10,6 @@
 
 use crate::config::Config;
 
-/// Kemana request harus diteruskan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Upstream {
     /// Axum REST + WebSocket (:8080)
@@ -19,8 +18,8 @@ pub enum Upstream {
     Frontend,
     /// RustFS S3 Storage (:9000)
     ///   - via subdomain image.ulalaapi.store/* (no strip)
-    ///   - via path ulalaapi.store/image/* (strip "/image" prefix, handled di proxy.rs)
-    ///   - via path ulala.space/image/* (strip "/image" prefix, handled di proxy.rs)
+    ///   - via path ulalaapi.store/image/* (strip "/image" prefix, handled di router.rs)
+    ///   - via path ulala.space/image/* (strip "/image" prefix, handled di router.rs)
     RustFS3,
     /// RustFS Web Console (:9001) — via subdomain ui.ulalaapi.store
     RustFSUI,

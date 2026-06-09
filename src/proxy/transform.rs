@@ -307,8 +307,6 @@ pub fn apply_response(
     //   eksplisit, mis: https://*.{api} https://lh3.googleusercontent.com ...
     //   connect-src tetap dibatasi ke API domain + subdomainnya (lebih sensitif).
     if matches!(ctx.route, RouteKind::Static) {
-        let api = cfg.api_domain.as_str();
-
         // CSP dan COOP hanya relevan untuk HTML page (index.html), bukan untuk
         // .wasm/.js/.css asset. Browser memang abaikan CSP pada non-HTML resource,
         // tapi lebih clean dan hemat bandwidth kalau tidak di-set ke asset files.
@@ -316,17 +314,15 @@ pub fn apply_response(
         // is_static=false → route SPA (/, /explore, /events) → upstream serve index.html
         // is_static=true  → file asset (.wasm, .js, .css, .png, ...) → tidak perlu CSP
         if !ctx.is_static {
-            let csp = format!(
-                "default-src 'self'; \
-                 script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; \
-                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-                 font-src 'self' https://fonts.gstatic.com; \
-                 img-src 'self' data: blob: https:; \
-                 connect-src 'self' https://{api} https://*.{api} wss://{api}; \
-                 object-src 'none'; \
-                 base-uri 'self'",
-            );
-            upstream_resp.insert_header("content-security-policy", csp.as_str())?;
+            // Pakai CSP yang sudah di-precompute saat startup (config.rs).
+            // Fallback build inline hanya kalau csp_header kosong (mis. Config
+            // dikonstruksi manual di test tanpa lewat load()).
+            if cfg.csp_header.is_empty() {
+                let csp = crate::config::build_csp_header(&cfg.api_domain);
+                upstream_resp.insert_header("content-security-policy", csp.as_str())?;
+            } else {
+                upstream_resp.insert_header("content-security-policy", cfg.csp_header.as_str())?;
+            }
             // COOP: same-origin hanya bermakna untuk HTML page (window isolation).
             // Tidak ada efek pada .wasm/.js response, jadi scope ke is_static=false saja.
             // COEP: DIHAPUS (lihat komentar di atas).
