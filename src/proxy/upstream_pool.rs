@@ -13,7 +13,9 @@ use smol_str::SmolStr;
 
 const STATE_CLOSED: u8 = 0;
 const STATE_OPEN: u8 = 1;
-const STATE_HALF_OPEN: u8 = 2;
+// PROBING: exactly one thread won OPEN→PROBING CAS and is the live probe.
+// All other requests are blocked until record_success() or record_failure().
+const STATE_PROBING: u8 = 2;
 
 pub struct CircuitBreaker {
     state: AtomicU8,
@@ -40,20 +42,22 @@ impl CircuitBreaker {
             STATE_OPEN => {
                 let elapsed = now_secs().saturating_sub(self.last_failure.load(Ordering::Relaxed));
                 if elapsed >= self.cooldown_secs {
+                    // Only the thread that wins OPEN→PROBING CAS sends the probe.
+                    // All concurrent losers get false — no concurrent probes allowed.
                     self.state
                         .compare_exchange(
                             STATE_OPEN,
-                            STATE_HALF_OPEN,
+                            STATE_PROBING,
                             Ordering::Release,
                             Ordering::Relaxed,
                         )
-                        .ok();
-                    true
+                        .is_ok()
                 } else {
                     false
                 }
             }
-            _ => true, // HALF_OPEN: izinkan 1 probe
+            // STATE_PROBING: probe already in flight — block all other requests.
+            _ => false,
         }
     }
 
@@ -68,6 +72,16 @@ impl CircuitBreaker {
         if failures >= self.threshold {
             self.state.store(STATE_OPEN, Ordering::Release);
             tracing::warn!("Circuit breaker OPEN setelah {} failures", failures);
+        } else {
+            // Probe failed but still below threshold — go back to OPEN so a new
+            // probe can be attempted after the next cooldown window.
+            // CAS guards against overwriting a concurrent state change.
+            let _ = self.state.compare_exchange(
+                STATE_PROBING,
+                STATE_OPEN,
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -75,7 +89,7 @@ impl CircuitBreaker {
         match self.state.load(Ordering::Relaxed) {
             STATE_CLOSED => "closed",
             STATE_OPEN => "open",
-            STATE_HALF_OPEN => "half-open",
+            STATE_PROBING => "half-open",
             _ => "unknown",
         }
     }

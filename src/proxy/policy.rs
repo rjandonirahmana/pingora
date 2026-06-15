@@ -156,10 +156,21 @@ impl RateLimiter {
             }
         }
 
-        let bucket = Arc::new(Bucket::new(self.capacity));
-        bucket.try_consume(self.capacity, self.refill_per_sec);
-        self.buckets.insert(ip, bucket);
-        Ok(())
+        // entry().or_insert_with() is atomic per shard:
+        //   - Only one thread inserts a new bucket for a given IP.
+        //   - Concurrent threads for the same IP get the existing bucket.
+        //   - try_consume() result is correctly propagated (fixes silent discard bug).
+        let allowed = self
+            .buckets
+            .entry(ip)
+            .or_insert_with(|| Arc::new(Bucket::new(self.capacity)))
+            .try_consume(self.capacity, self.refill_per_sec);
+
+        if allowed {
+            Ok(())
+        } else {
+            Err(PolicyError::RateLimited { retry_after_secs: 1 })
+        }
     }
 
     /// Hapus bucket yang idle lebih lama dari `idle_secs`. Return jumlah yang dihapus.

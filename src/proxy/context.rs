@@ -208,14 +208,6 @@ impl RequestCtx {
     pub fn id_hex(&self) -> String {
         format!("{:016x}", self.id)
     }
-
-    /// Zero-alloc elapsed string: tulis u64 ke stack buffer.
-    #[inline]
-    pub fn elapsed_ms_buf(&self) -> itoa::Buffer {
-        let mut buf = itoa::Buffer::new();
-        let _ = buf.format(self.elapsed_ms());
-        buf
-    }
 }
 
 impl Default for RequestCtx {

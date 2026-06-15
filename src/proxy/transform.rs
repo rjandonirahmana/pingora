@@ -335,7 +335,7 @@ pub fn apply_response(
     }
 
     let id_buf = ctx.id_hex_buf();
-    let mut elapsed_buf = ctx.elapsed_ms_buf();
+    let mut elapsed_buf = itoa::Buffer::new();
     upstream_resp.insert_header("x-request-id", id_buf.as_str())?;
     upstream_resp.insert_header("x-served-by", "kinetic-proxy")?;
     upstream_resp.insert_header("x-elapsed-ms", elapsed_buf.format(ctx.elapsed_ms()))?;
