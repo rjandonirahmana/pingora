@@ -344,13 +344,15 @@ const ALLOW_EMPTY_REFERER: bool = true;
 
 /// Ekstrak host dari sebuah URL/Referer tanpa alokasi.
 /// "https://ulala.space/foo?x=1" → Some("ulala.space")
+/// "[::1]:3100" → Some("[::1]")  (IPv6-safe via strip_port dari transform.rs)
 fn url_host(url: &str) -> Option<&str> {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let host_port = after_scheme.split(['/', '?', '#']).next()?;
     // buang userinfo "user:pass@host" → ambil setelah '@' terakhir
     let host_port = host_port.rsplit('@').next()?;
-    // buang port → ambil sebelum ':' (aman untuk hostname biasa, bukan IPv6 literal)
-    let host = host_port.split(':').next()?;
+    // FIX: gunakan strip_port() yang sudah IPv6-aware ([::1]:port → [::1])
+    // Sebelumnya: split(':').next() → pecah di ':' pertama dalam "[::1]:3100" → "[" (salah).
+    let host = crate::proxy::transform::strip_port(host_port);
     if host.is_empty() {
         None
     } else {
@@ -428,6 +430,9 @@ mod hotlink_tests {
         assert_eq!(url_host("https://host:8443"), Some("host"));
         assert_eq!(url_host("garbage"), Some("garbage"));
         assert_eq!(url_host("https://"), None);
+        // IPv6 — sebelumnya split(':').next() pecah di ':' pertama → "[" (salah)
+        assert_eq!(url_host("http://[::1]:3100/"), Some("[::1]"));
+        assert_eq!(url_host("https://[::1]/path"), Some("[::1]"));
     }
 
     #[test]

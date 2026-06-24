@@ -106,11 +106,29 @@ impl StaticServe {
             // Root path → SPA fallback
             (self.root.join("index.html"), true)
         } else if let Ok(meta) = fs::metadata(&requested).await {
+            // Security: symlink traversal — canonical path harus tetap di dalam root.
+            // fs::metadata() mengikuti symlink; penyerang bisa buat symlink ke /etc/passwd.
+            // canonicalize() resolve semua symlink dan ".." ke path nyata.
+            let canonical = match tokio::fs::canonicalize(&requested).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::debug!(path = %requested.display(), "canonicalize gagal: {e}");
+                    return Ok(false);
+                }
+            };
+            if !canonical.starts_with(&self.root) {
+                tracing::warn!(
+                    path,
+                    canonical = %canonical.display(),
+                    "static serve: symlink traversal diblokir"
+                );
+                return Ok(false);
+            }
             if meta.is_file() {
-                (requested.clone(), false)
+                (canonical, false)
             } else {
                 // Directory → coba index.html
-                (requested.join("index.html"), true)
+                (canonical.join("index.html"), true)
             }
         } else {
             // File tidak ada di disk
@@ -399,6 +417,19 @@ fn accepts(accept_encoding: &str, target: &str) -> bool {
     accept_encoding.split(',').any(|part| {
         let mut it = part.split(';');
         let token = it.next().unwrap_or("").trim();
+
+        // RFC 9110 §12.5.3: "*" berarti semua encoding diterima.
+        // Cek q-value dulu sebelum return true.
+        if token == "*" {
+            for param in it {
+                if let Some(q) = param.trim().strip_prefix("q=") {
+                    if let Ok(qv) = q.trim().parse::<f32>() {
+                        return qv > 0.0;
+                    }
+                }
+            }
+            return true;
+        }
 
         let token_matches = token.eq_ignore_ascii_case(target)
             || (target == "gzip" && token.eq_ignore_ascii_case("x-gzip"));

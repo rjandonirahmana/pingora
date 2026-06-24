@@ -149,7 +149,7 @@ impl ProxyHttp for KineticProxy {
 
         let client_ip: Option<IpAddr> = session
             .client_addr()
-            .and_then(|addr| addr.to_string().parse::<std::net::SocketAddr>().ok())
+            .and_then(|addr| addr.as_inet())
             .map(|sa| sa.ip());
 
         let decision = router::route(&host_owned, &path_owned, &self.state.cfg);
@@ -473,11 +473,11 @@ impl ProxyHttp for RedirectProxy {
             .unwrap_or("");
         let path = req.uri.path();
 
-        // FIX: hindari format!() saat tidak ada query string (kasus paling umum)
-        let location = match req.uri.query() {
-            None => format!("https://{}{}", host, path),
-            Some(q) => format!("https://{}{}?{}", host, path, q),
-        };
+        // FIX: gunakan path_and_query() — sudah percent-encoded dari URI asli.
+        // format!("?{}", q) dari req.uri.query() bisa produce invalid URL
+        // jika query string mengandung spasi atau karakter khusus lain.
+        let pq = req.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or(path);
+        let location = format!("https://{}{}", host, pq);
 
         let mut resp = ResponseHeader::build(http::StatusCode::MOVED_PERMANENTLY, None)?;
         resp.insert_header("location", location.as_str())?;
