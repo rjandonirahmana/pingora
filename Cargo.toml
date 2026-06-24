@@ -20,6 +20,7 @@ http = "1.4.2"
 smol_str = "0.3"
 itoa = "1"
 dashmap = "6.2.1"
+tokio-util = "0.7"
 
 [[bin]]
 name = "kinetic-proxy"

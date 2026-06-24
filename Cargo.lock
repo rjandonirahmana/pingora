@@ -898,6 +898,7 @@ dependencies = [
  "serde_yaml",
  "smol_str",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

@@ -20,6 +20,11 @@ use pingora_proxy::Session;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
+
+// Ukuran chunk untuk streaming file besar (64 KB).
+// Cegah single fs::read() mengalokasi seluruh WASM (5–20MB) per concurrent request.
+const STREAM_CHUNK_SIZE: usize = 65_536;
 
 use crate::proxy::transform::mime_from_path;
 
@@ -196,90 +201,70 @@ impl StaticServe {
             (file_path.clone(), None)
         };
 
-        // ── Baca file ──────────────────────────────────────────────────────────
-        let body = match fs::read(&serve_path).await {
-            Ok(b) => b,
-            Err(e) => {
-                // Kalau compressed variant error (race condition / fs issue),
-                // fallback ke file asli — lebih baik slow daripada 404.
-                if content_encoding.is_some() && serve_path != file_path {
-                    tracing::warn!(
-                        compressed = %serve_path.display(),
-                        original   = %file_path.display(),
-                        "compressed variant error, fallback ke file asli: {}", e
-                    );
-                    match fs::read(&file_path).await {
-                        Ok(b) => {
-                            // serve tanpa encoding (fallback ke raw karena compressed error)
-                            return self
-                                .write_response(session, &method, &file_path, b, None, is_fallback)
-                                .await;
-                        }
-                        Err(e2) => {
-                            tracing::debug!(
-                                path = %file_path.display(),
-                                "static file tidak ditemukan: {}", e2
-                            );
-                            return Ok(false);
-                        }
-                    }
-                } else {
-                    tracing::debug!(
-                        requested = %requested.display(),
-                        fallback  = %file_path.display(),
-                        "static file tidak ditemukan: {}", e
-                    );
-                    return Ok(false);
-                }
-            }
-        };
+        // ── Stream file ke client ─────────────────────────────────────────────
+        // Kalau compressed variant error, fallback ke file asli.
+        let result = self
+            .write_response(session, &method, &file_path, &serve_path, content_encoding, is_fallback)
+            .await;
 
-        self.write_response(
-            session,
-            &method,
-            &file_path,
-            body,
-            content_encoding,
-            is_fallback,
-        )
-        .await
+        if let Err(ref e) = result {
+            if content_encoding.is_some() && serve_path != file_path {
+                tracing::warn!(
+                    compressed = %serve_path.display(),
+                    original   = %file_path.display(),
+                    "compressed variant error, fallback ke file asli: {}", e
+                );
+                return self
+                    .write_response(session, &method, &file_path, &file_path, None, is_fallback)
+                    .await;
+            }
+        }
+        result
     }
 
-    /// Helper: build + write HTTP response ke session.
-    /// file_path = path asli (untuk MIME detection), serve_path bisa .br/.gz.
+    /// Build + stream HTTP response ke session.
+    /// `file_path`  = path file asli (MIME/ETag/Content-Length dari metadata ini).
+    /// `serve_path` = file yang benar-benar dibaca (mungkin .br/.gz variant).
+    ///
+    /// FIX: ganti fs::read() (load seluruh file ke Vec<u8>) dengan streaming 64KB chunk.
+    /// Untuk WASM 15MB × 1000 concurrent request = 15GB → sekarang cukup 64KB per request.
     async fn write_response(
         &self,
         session: &mut Session,
         method: &str,
         file_path: &Path,
-        body: Vec<u8>,
+        serve_path: &Path,
         content_encoding: Option<&'static str>,
         is_fallback: bool,
     ) -> Result<bool> {
-        // ── ETag dari metadata file ASLI (size + mtime) ───────────────────────
-        // Weak ETag: W/"size-mtime". Murah (tidak hash konten), dan karena
-        // berbasis file asli ia representation-independent — cocok dipakai
-        // lintas variant br/gz/raw (konten ter-decode identik).
-        // Tidak di-generate untuk SPA fallback (index.html no-store, percuma).
-        let etag: Option<String> = if is_fallback {
-            None
+        // ── Metadata file asli — untuk ETag dan content-length ───────────────
+        // ETag: Weak ETag dari file asli (size + mtime), representasi-independen
+        // (cocok lintas br/gz/raw). Skip untuk SPA fallback (no-store, percuma).
+        let file_meta = if !is_fallback {
+            fs::metadata(file_path).await.ok()
         } else {
-            fs::metadata(file_path).await.ok().and_then(|m| {
-                let size = m.len();
-                let mtime = m
-                    .modified()
-                    .ok()?
-                    .duration_since(UNIX_EPOCH)
-                    .ok()?
-                    .as_secs();
-                Some(format!(r#"W/"{size}-{mtime}""#))
-            })
+            None
+        };
+
+        let etag: Option<String> = file_meta.as_ref().and_then(|m| {
+            let size = m.len();
+            let mtime = m
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            Some(format!(r#"W/"{size}-{mtime}""#))
+        });
+
+        // Content-Length dari file yang benar-benar di-serve (bisa .br/.gz).
+        let serve_len: u64 = if serve_path == file_path {
+            file_meta.as_ref().map(|m| m.len()).unwrap_or(0)
+        } else {
+            fs::metadata(serve_path).await.ok().map(|m| m.len()).unwrap_or(0)
         };
 
         // ── 304 Not Modified ──────────────────────────────────────────────────
-        // Berlaku untuk GET dan HEAD (keduanya conditional request yang valid).
-        // Ekstrak If-None-Match jadi owned dulu supaya borrow immutable session
-        // selesai sebelum write_response_header() butuh &mut.
         let if_none_match: Option<String> = session
             .req_header()
             .headers
@@ -312,44 +297,31 @@ impl StaticServe {
             return Ok(true);
         }
 
-        // MIME selalu dari file asli — bukan dari .br atau .gz
+        // ── MIME type (selalu dari file asli) ─────────────────────────────────
         let mut mime =
             mime_from_path(file_path.to_str().unwrap_or("")).unwrap_or("application/octet-stream");
-
-        // WASM MUST have correct MIME type or browser refuses to instantiate.
-        // Double-check meski mime_from_path sudah benar — safety net.
         if file_path.extension().map(|e| e == "wasm").unwrap_or(false) {
             mime = "application/wasm";
         }
 
-        // Simpan len SEBELUM body di-move ke Bytes (dipakai content-length + tracing).
-        let body_len = body.len();
-
+        // ── Build response header ─────────────────────────────────────────────
         let mut resp = ResponseHeader::build(200, None)?;
         resp.insert_header("content-type", mime)?;
-        // Zero-alloc content-length via itoa (konsisten dgn pemakaian itoa di reject()).
+
+        // Content-Length dari metadata — tidak perlu baca file dulu.
         let mut len_buf = itoa::Buffer::new();
-        resp.insert_header("content-length", len_buf.format(body_len))?;
+        resp.insert_header("content-length", len_buf.format(serve_len))?;
 
         if let Some(ref tag) = etag {
             resp.insert_header("etag", tag.as_str())?;
         }
-
-        // Content-Encoding + Vary: hanya saat serve pre-compressed variant.
-        //
-        // Vary: Accept-Encoding WAJIB ada kalau content-encoding di-set.
-        // Tanpa ini: CDN/browser bisa cache brotli response dan serve ke client
-        // yang tidak support brotli → corrupted/garbled content.
         if let Some(enc) = content_encoding {
             resp.insert_header("content-encoding", enc)?;
             resp.insert_header("vary", "accept-encoding")?;
         }
-
         if is_fallback {
             resp.insert_header("cache-control", "no-cache, no-store, must-revalidate")?;
         } else {
-            // Trunk embed content hash di nama file → immutable safe.
-            // stale-while-revalidate beri grace window untuk intermediary cache.
             resp.insert_header(
                 "cache-control",
                 "public, max-age=31536000, immutable, stale-while-revalidate=86400",
@@ -358,23 +330,60 @@ impl StaticServe {
 
         if method == "HEAD" {
             session.write_response_header(Box::new(resp), true).await?;
-        } else {
-            session.write_response_header(Box::new(resp), false).await?;
-            // FIX: zero-copy. Bytes::from(Vec) reuse backing allocation Vec
-            // tanpa memcpy — tidak ada lagi body.clone() yang menggandakan
-            // 5–15 MB WASM di heap per request.
+            tracing::debug!(path = %file_path.display(), bytes = serve_len, "HEAD served");
+            return Ok(true);
+        }
+
+        // ── Stream body dalam chunk 64KB ──────────────────────────────────────
+        // Menghindari load seluruh WASM (5–20MB) ke heap per request.
+        // tokio::fs::File hanya buka file descriptor; konten dibaca inkremental.
+        let mut file = fs::File::open(serve_path).await.map_err(|e| {
+            tracing::debug!(path = %serve_path.display(), "static file tidak bisa dibuka: {e}");
+            pingora_core::Error::explain(
+                pingora_core::ErrorType::FileOpenError,
+                format!("open {}: {e}", serve_path.display()),
+            )
+        })?;
+
+        session.write_response_header(Box::new(resp), false).await?;
+
+        let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+        let mut total_sent: u64 = 0;
+        loop {
+            let n = file.read(&mut buf).await.map_err(|e| {
+                pingora_core::Error::explain(
+                    pingora_core::ErrorType::ReadError,
+                    format!("read {}: {e}", serve_path.display()),
+                )
+            })?;
+            if n == 0 {
+                break;
+            }
+            total_sent += n as u64;
+            let is_last = total_sent >= serve_len;
             session
-                .write_response_body(Some(bytes::Bytes::from(body)), true)
+                .write_response_body(
+                    Some(bytes::Bytes::copy_from_slice(&buf[..n])),
+                    is_last,
+                )
                 .await?;
+            if is_last {
+                break;
+            }
+        }
+
+        // Pastikan body ditutup jika file lebih pendek dari metadata (truncated file).
+        if total_sent < serve_len {
+            session.write_response_body(None, true).await?;
         }
 
         tracing::debug!(
             path     = %file_path.display(),
             fallback = is_fallback,
-            bytes    = body_len,
+            bytes    = total_sent,
             mime     = mime,
             encoding = content_encoding.unwrap_or("none"),
-            "static served"
+            "static served (streamed)"
         );
 
         Ok(true)

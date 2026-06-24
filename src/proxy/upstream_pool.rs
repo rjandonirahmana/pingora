@@ -21,6 +21,8 @@ pub struct CircuitBreaker {
     state: AtomicU8,
     failures: AtomicU32,
     last_failure: AtomicU64,
+    // Timestamp saat masuk STATE_PROBING — untuk deteksi probe yang stuck/panic.
+    probing_since: AtomicU64,
     threshold: u32,
     cooldown_secs: u64,
 }
@@ -31,6 +33,7 @@ impl CircuitBreaker {
             state: AtomicU8::new(STATE_CLOSED),
             failures: AtomicU32::new(0),
             last_failure: AtomicU64::new(0),
+            probing_since: AtomicU64::new(0),
             threshold,
             cooldown_secs,
         }
@@ -44,7 +47,8 @@ impl CircuitBreaker {
                 if elapsed >= self.cooldown_secs {
                     // Only the thread that wins OPEN→PROBING CAS sends the probe.
                     // All concurrent losers get false — no concurrent probes allowed.
-                    self.state
+                    if self
+                        .state
                         .compare_exchange(
                             STATE_OPEN,
                             STATE_PROBING,
@@ -52,12 +56,45 @@ impl CircuitBreaker {
                             Ordering::Relaxed,
                         )
                         .is_ok()
+                    {
+                        // Catat waktu masuk PROBING untuk timeout detection.
+                        self.probing_since.store(now_secs(), Ordering::Relaxed);
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
             }
             // STATE_PROBING: probe already in flight — block all other requests.
-            _ => false,
+            // FIX: Jika probe stuck > 2× cooldown (panic/timeout), force reset ke OPEN
+            // agar probe baru bisa dikirim. Tanpa ini, state PROBING permanen jika
+            // probe thread panic sebelum record_success/record_failure dipanggil.
+            _ => {
+                let since = self.probing_since.load(Ordering::Relaxed);
+                if since > 0
+                    && now_secs().saturating_sub(since) > self.cooldown_secs * 2
+                {
+                    if self
+                        .state
+                        .compare_exchange(
+                            STATE_PROBING,
+                            STATE_OPEN,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        self.probing_since.store(0, Ordering::Relaxed);
+                        tracing::warn!(
+                            cooldown = self.cooldown_secs * 2,
+                            "Circuit breaker: PROBING timeout — reset ke OPEN"
+                        );
+                    }
+                }
+                false
+            }
         }
     }
 

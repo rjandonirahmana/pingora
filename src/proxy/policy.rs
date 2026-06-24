@@ -42,18 +42,25 @@ pub enum PolicyError {
 
 struct Bucket {
     tokens: AtomicU32,
-    last_refill: AtomicU64, // unix seconds
+    last_refill: AtomicU64, // unix seconds — kapan token terakhir di-refill
+    last_seen: AtomicU64,   // unix seconds — kapan request terakhir diterima
 }
 
 impl Bucket {
     fn new(capacity: u32) -> Self {
+        let now = now_secs();
         Self {
             tokens: AtomicU32::new(capacity),
-            last_refill: AtomicU64::new(now_secs()),
+            last_refill: AtomicU64::new(now),
+            last_seen: AtomicU64::new(now),
         }
     }
 
     fn try_consume(&self, capacity: u32, refill_per_sec: u32) -> bool {
+        // Catat waktu request ini — dipakai eviction (bukan last_refill yang
+        // hanya update saat ada token yang ditambahkan).
+        self.last_seen.store(now_secs(), Ordering::Relaxed);
+
         let now = now_secs();
         let last = self.last_refill.load(Ordering::Relaxed);
         let elapsed = now.saturating_sub(last);
@@ -176,11 +183,16 @@ impl RateLimiter {
     /// Hapus bucket yang idle lebih lama dari `idle_secs`. Return jumlah yang dihapus.
     /// Dipakai oleh cleanup periodik (idle 1 jam) dan eviction inline saat tabel
     /// penuh (idle 5 menit).
+    ///
+    /// FIX: pakai `last_seen` bukan `last_refill` untuk eviction.
+    /// `last_refill` hanya update saat ada token baru (tergantung refill_per_sec).
+    /// IP yang membuat 1 req/jam bisa memiliki last_refill yang tidak pernah update
+    /// kalau refill threshold > waktu antar request. `last_seen` update setiap request.
     fn evict_stale(&self, idle_secs: u64) -> usize {
         let cutoff = now_secs().saturating_sub(idle_secs);
         let before = self.buckets.len();
         self.buckets
-            .retain(|_, bucket| bucket.last_refill.load(Ordering::Relaxed) > cutoff);
+            .retain(|_, bucket| bucket.last_seen.load(Ordering::Relaxed) > cutoff);
         before - self.buckets.len()
     }
 

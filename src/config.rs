@@ -104,7 +104,7 @@ pub fn build_csp_header(api_domain: &str) -> String {
 }
 
 impl Config {
-    pub fn load() -> Self {
+    pub fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Baca config.yaml
         let mut cfg: Config = if let Ok(content) = fs::read_to_string("config.yaml") {
             match serde_yaml::from_str(&content) {
@@ -112,7 +112,7 @@ impl Config {
                 Err(e) => {
                     tracing::error!("FATAL: Gagal parse config.yaml: {e}");
                     tracing::error!("Cek indentasi dan field di config.yaml");
-                    std::process::exit(1);
+                    return Err(Box::new(e));
                 }
             }
         } else {
@@ -155,7 +155,7 @@ impl Config {
 
         // 4. Validasi — log WARNING jelas jika TLS bermasalah
         cfg.validate();
-        cfg
+        Ok(cfg)
     }
 
     /// Apakah TLS dikonfigurasi DAN cert file benar-benar ada di disk.

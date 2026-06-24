@@ -210,6 +210,35 @@ impl RequestCtx {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_buf_matches_format_macro() {
+        for id in [0u64, 1, 0x1234, 0xdeadbeef, u64::MAX] {
+            let ctx = RequestCtx { id, ..RequestCtx::default() };
+            assert_eq!(
+                ctx.id_hex_buf().as_str(),
+                ctx.id_hex().as_str(),
+                "id_hex_buf mismatch untuk id={id:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn hex_buf_known_values() {
+        let ctx = RequestCtx { id: 0, ..RequestCtx::default() };
+        assert_eq!(ctx.id_hex_buf().as_str(), "0000000000000000");
+
+        let ctx = RequestCtx { id: 0x1234, ..RequestCtx::default() };
+        assert_eq!(ctx.id_hex_buf().as_str(), "0000000000001234");
+
+        let ctx = RequestCtx { id: u64::MAX, ..RequestCtx::default() };
+        assert_eq!(ctx.id_hex_buf().as_str(), "ffffffffffffffff");
+    }
+}
+
 impl Default for RequestCtx {
     fn default() -> Self {
         Self {

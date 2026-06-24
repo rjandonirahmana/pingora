@@ -19,6 +19,8 @@ use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use async_trait::async_trait;
 use pingora_core::prelude::*;
 use pingora_core::server::Server;
@@ -67,6 +69,14 @@ pub struct KineticProxy {
     state: Arc<ProxyState>,
     // OnceLock: cleanup task di-spawn tepat sekali saat request pertama.
     cleanup_spawned: Arc<OnceLock<()>>,
+    // Token untuk stop cleanup task saat KineticProxy di-drop (graceful shutdown).
+    cleanup_token: CancellationToken,
+}
+
+impl Drop for KineticProxy {
+    fn drop(&mut self) {
+        self.cleanup_token.cancel();
+    }
 }
 
 #[async_trait]
@@ -85,16 +95,24 @@ impl ProxyHttp for KineticProxy {
         // tidak perlu explicit cancel — OS cleanup saat process exit.
         if self.cleanup_spawned.set(()).is_ok() {
             let rate_limiter = Arc::clone(&self.state.policy.rate_limiter);
+            let token = self.cleanup_token.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
-                    interval.tick().await;
-                    rate_limiter.cleanup();
-                    tracing::debug!(
-                        active_ips = rate_limiter.active_count(),
-                        "rate limiter cleanup"
-                    );
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            tracing::info!("rate limiter cleanup task stopped");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            rate_limiter.cleanup();
+                            tracing::debug!(
+                                active_ips = rate_limiter.active_count(),
+                                "rate limiter cleanup"
+                            );
+                        }
+                    }
                 }
             });
         }
@@ -500,6 +518,7 @@ pub fn build_proxy_service(
     let proxy = KineticProxy {
         state,
         cleanup_spawned: Arc::new(OnceLock::new()),
+        cleanup_token: CancellationToken::new(),
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 

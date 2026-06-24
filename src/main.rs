@@ -57,7 +57,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     // ── Config ────────────────────────────────────────────────────────────────
-    let cfg = config::Config::load();
+    let cfg = config::Config::load().map_err(|e| {
+        tracing::error!("FATAL: gagal load config: {e}");
+        e
+    })?;
 
     tracing::info!(
         web    = %cfg.web_domain,
