@@ -23,7 +23,10 @@ services:
     
     # Env override — lebih praktis dari rebuild image
     environment:
-      - RUST_LOG=info,kinetic_proxy=debug
+      # Produksi: `info`. Level debug membanjiri log (per-request id/method +
+      # rate-limiter cleanup tiap menit). Untuk debug sementara ganti ke
+      # `info,kinetic_proxy=debug`. CATATAN: env ini menang atas default di kode.
+      - RUST_LOG=info
       # Override jika perlu:
       # - PROXY_WEB_DOMAIN=ulala.space
       # - PROXY_API_DOMAIN=ulalaapi.store

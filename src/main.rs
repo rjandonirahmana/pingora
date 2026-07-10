@@ -47,10 +47,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // ── Logging ───────────────────────────────────────────────────────────────
     // with_ansi(false): log container / systemd tidak perlu ANSI color codes.
     // with_target(true): tunjukkan module path untuk filtering yang presisi.
+    // Default `info`: di produksi level DEBUG membanjiri log (satu baris per
+    // request `id=… method=…` + `rate limiter cleanup` tiap menit). Untuk
+    // debugging, override via env: `RUST_LOG=info,kinetic_proxy=debug`.
     fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,kinetic_proxy=debug")),
+                .unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_ansi(false)
         .with_target(true)

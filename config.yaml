@@ -12,8 +12,15 @@ web_domain: "ulala.space" # SPA Leptos
 api_domain: "ulalaapi.store" # REST + WS + Image
 
 # ── Upstream services ─────────────────────────────────────────────────────────
-backend_addr: "127.0.0.1:8080" # Axum REST + WebSocket
-frontend_addr: "127.0.0.1:3100" # static-web-server (Leptos SPA)
+# CATATAN ARSITEKTUR: app e-ticketing kini UNIFIED — satu binary Leptos SSR yang
+# melayani SSR + REST (/api/*, /api/live, /api/rtc) + WebSocket (/ws/*) sekaligus
+# di port 3100 (docker -p 3100:3000). TIDAK ada service Axum terpisah di :8080.
+# Karena itu backend_addr HARUS menunjuk ke app yang sama (3100), bukan 8080 yang
+# mati — kalau tidak, route /api/* & /ws/* ke Backend akan connection-refused
+# (circuit breaker 8080 di log naik s/d 10k+ failures). Kalau nanti REST dipisah
+# ke service Axum sendiri, kembalikan ke 127.0.0.1:8080 dan jalankan service itu.
+backend_addr: "127.0.0.1:3100" # unified: sama dengan app SSR (dulu :8080 Axum terpisah — sudah tidak ada)
+frontend_addr: "127.0.0.1:3100" # Leptos SSR (docker -p 3100:3000)
 image_addr: "127.0.0.1:3902" # Garage S3 web UI
 rustfs_ui_address: "127.0.0.1:9001"
 rustfs_s3_address: "127.0.0.1:9000"

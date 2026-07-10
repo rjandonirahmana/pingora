@@ -140,10 +140,17 @@ impl ProxyHttp for KineticProxy {
 
         // Owned sekarang — diperlukan untuk RequestCtx (lifetime independence)
         let path_owned = path.to_string();
+        // Host: HTTP/1.1 mengirim header `Host`, tapi HTTP/2 (semua browser https)
+        // menaruh authority di pseudo-header `:authority` → header `host` kerap
+        // KOSONG. Ambil header dulu, fallback ke URI authority. Tanpa fallback ini,
+        // Host allowlist di bawah menolak SEMUA request H2 (host kosong) → seluruh
+        // situs balas 421 "Not found".
         let host_owned = req
             .headers
             .get("host")
             .and_then(|v| v.to_str().ok())
+            .filter(|h| !h.is_empty())
+            .or_else(|| req.uri.host())
             .unwrap_or("")
             .to_string();
 
@@ -158,7 +165,10 @@ impl ProxyHttp for KineticProxy {
         // Frontend :3100 → koneksi backend terbuang + circuit breaker berputar.
         // 421 Misdirected Request: benar secara semantik & memberitahu client sah
         // (yang salah sambung SNI/Host) untuk membuka koneksi baru.
-        if !router::is_known_host(&host_owned, &self.state.cfg) {
+        // Fail-open bila host tak terdeteksi (kosong): jangan pernah menjatuhkan
+        // seluruh situs hanya karena host tak terbaca — cukup tolak host yang
+        // JELAS ada dan bukan milik kita.
+        if !host_owned.is_empty() && !router::is_known_host(&host_owned, &self.state.cfg) {
             tracing::debug!(host = %host_owned, path = %path_owned, "reject unknown host");
             let mut resp = ResponseHeader::build(http::StatusCode::MISDIRECTED_REQUEST, None)?;
             resp.insert_header("content-type", "text/plain")?;

@@ -42,6 +42,7 @@ jobs:
             docker rm kinetic-proxy || true &&
             docker run -d \
             --name kinetic-proxy \
+            --runtime youki \
             --restart unless-stopped \
             --network host \
             -v /etc/letsencrypt:/etc/letsencrypt:ro \
