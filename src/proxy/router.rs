@@ -182,9 +182,43 @@ fn is_api_domain(host: &str, cfg: &Config) -> bool {
             && host.ends_with(cfg.api_domain.as_str()))
 }
 
+/// True bila `host` adalah salah satu domain yang KITA layani (web/api +
+/// subdomain storage). Dipakai untuk menolak scanner internet yang mengirim
+/// Host asing (IP mentah, domain phishing) — tanpa ini rule fallback global
+/// (#10) meneruskannya ke Frontend :3100, membuang koneksi backend & memicu
+/// circuit breaker. Header `Host` yang kosong/hilang juga bukan host kita.
+#[inline]
+pub fn is_known_host(host: &str, cfg: &Config) -> bool {
+    let host = bare_host(host);
+    !host.is_empty()
+        && (is_web_domain(host, cfg)
+            || is_api_domain(host, cfg)
+            || host == cfg.image_subdomain.as_str()
+            || host == cfg.ui_subdomain.as_str())
+}
+
 #[inline]
 fn is_ws_path(path: &str) -> bool {
-    path.starts_with("/api/ws/") || path == "/api/ws"
+    // Chat lama memakai prefix `/api/ws/`. Signaling live (WebRTC) & meet (zoom)
+    // memakai prefix `/ws/` langsung di app:
+    //   - live   : `/ws/live/publish`, `/ws/live/subscribe`, `/ws/lives`
+    //   - meet   : `/ws/meet/{room_id}`  (konferensi P2P mesh + waiting room)
+    // Semua harus di-upgrade WebSocket dan diteruskan ke Backend — tanpa baris
+    // `/ws/` ini, signaling jatuh ke Frontend (static-web-server) dan koneksi WS
+    // tidak pernah terbentuk.
+    //
+    // Catatan media (penting — TIDAK ada port tambahan di pingora):
+    //   - LIVE memakai SFU: media mengalir lewat UDP (SFU :4000) langsung ke
+    //     server. Buka UDP port SFU di firewall + set SFU_PUBLIC_IP.
+    //   - MEET memakai P2P mesh: media mengalir LANGSUNG antar-browser (lewat
+    //     STUN/TURN), tidak melewati server sama sekali. Pingora hanya mem-proxy
+    //     signaling (`/ws/meet`) + REST (`/api/meet`, `/api/rtc/ice`). TURN, bila
+    //     dipakai, adalah server coturn terpisah (UDP 3478) — bukan urusan pingora
+    //     (HTTP/TCP) yang memang tak bisa mem-proxy UDP.
+    path.starts_with("/api/ws/")
+        || path == "/api/ws"
+        || path.starts_with("/ws/")
+        || path == "/ws"
 }
 
 /// Deteksi apakah path adalah file static (punya ekstensi yang dikenal).
@@ -285,6 +319,52 @@ mod tests {
     }
 
     #[test]
+    fn web_domain_live_ws_routes_to_backend() {
+        let c = cfg();
+        // Signaling live (prefix /ws/) harus ke Backend sebagai WebSocket.
+        for p in ["/ws/lives", "/ws/live/publish/room1", "/ws/live/subscribe/room1"] {
+            let d = route("ulala.space", p, &c);
+            assert_eq!(d.upstream, Upstream::Backend, "{p} harus ke Backend");
+            assert!(d.is_ws, "{p} harus is_ws=true");
+            assert!(!d.is_static);
+        }
+    }
+
+    #[test]
+    fn api_domain_live_ws_routes_to_backend() {
+        let c = cfg();
+        let d = route("ulalaapi.store", "/ws/live/subscribe/room1", &c);
+        assert_eq!(d.upstream, Upstream::Backend);
+        assert!(d.is_ws);
+    }
+
+    #[test]
+    fn meet_ws_routes_to_backend() {
+        let c = cfg();
+        // Signaling meet (zoom P2P) — prefix /ws/ → Backend WebSocket, kedua domain.
+        for host in ["ulala.space", "ulalaapi.store"] {
+            let d = route(host, "/ws/meet/meet_abc123", &c);
+            assert_eq!(d.upstream, Upstream::Backend, "{host} /ws/meet harus Backend");
+            assert!(d.is_ws, "{host} /ws/meet harus is_ws=true");
+            assert!(!d.is_static);
+        }
+    }
+
+    #[test]
+    fn meet_rest_routes_to_backend() {
+        let c = cfg();
+        // REST meet + endpoint ICE server — prefix /api/ → Backend (bukan WS).
+        for host in ["ulala.space", "ulalaapi.store"] {
+            for p in ["/api/meet/rooms", "/api/meet/rooms/meet_abc123", "/api/rtc/ice"] {
+                let d = route(host, p, &c);
+                assert_eq!(d.upstream, Upstream::Backend, "{host} {p} harus Backend");
+                assert!(!d.is_ws, "{host} {p} bukan WS");
+                assert!(!d.is_static);
+            }
+        }
+    }
+
+    #[test]
     fn web_domain_spa_routes_to_frontend() {
         let c = cfg();
         assert_eq!(
@@ -362,6 +442,25 @@ mod tests {
             assert_eq!(a.upstream, b.upstream);
             assert_eq!(a.is_ws, b.is_ws);
         }
+    }
+
+    #[test]
+    fn known_host_allowlist() {
+        let c = cfg();
+        // Host sah — semua domain yang kita layani.
+        assert!(is_known_host("ulala.space", &c));
+        assert!(is_known_host("www.ulala.space", &c));
+        assert!(is_known_host("ulala.space:443", &c));
+        assert!(is_known_host("ulalaapi.store", &c));
+        assert!(is_known_host("image.ulalaapi.store", &c));
+        assert!(is_known_host("ui.ulalaapi.store", &c));
+        // Host scanner — harus ditolak.
+        assert!(!is_known_host("77.237.242.1", &c));
+        assert!(!is_known_host("web2.serviciodepaginasweb.cl", &c));
+        assert!(!is_known_host("", &c));
+        assert!(!is_known_host("evil.com", &c));
+        // Bukan subdomain sah kita.
+        assert!(!is_known_host("api.ulala.space.evil.com", &c));
     }
 
     #[test]

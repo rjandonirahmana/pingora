@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use pingora_core::prelude::*;
 use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_core::ErrorType;
+use pingora_core::{ErrorSource, ErrorType};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{http_proxy_service, ProxyHttp, Session};
 use smol_str::SmolStr;
@@ -151,6 +151,27 @@ impl ProxyHttp for KineticProxy {
             .client_addr()
             .and_then(|addr| addr.as_inet())
             .map(|sa| sa.ip());
+
+        // Host allowlist — tolak Host asing SEBELUM menyentuh backend. Scanner
+        // internet menghantam IP:443 kita dengan Host acak (IP mentah,
+        // *.serviciodepaginasweb.cl, dll); rule fallback #10 dulu meneruskannya ke
+        // Frontend :3100 → koneksi backend terbuang + circuit breaker berputar.
+        // 421 Misdirected Request: benar secara semantik & memberitahu client sah
+        // (yang salah sambung SNI/Host) untuk membuka koneksi baru.
+        if !router::is_known_host(&host_owned, &self.state.cfg) {
+            tracing::debug!(host = %host_owned, path = %path_owned, "reject unknown host");
+            let mut resp = ResponseHeader::build(http::StatusCode::MISDIRECTED_REQUEST, None)?;
+            resp.insert_header("content-type", "text/plain")?;
+            resp.insert_header("content-length", "9")?;
+            resp.insert_header("x-served-by", "kinetic-proxy")?;
+            resp.insert_header("cache-control", "no-store")?;
+            resp.insert_header("connection", "close")?;
+            session.write_response_header(Box::new(resp), false).await?;
+            session
+                .write_response_body(Some(bytes::Bytes::from_static(b"Not found")), true)
+                .await?;
+            return Ok(true);
+        }
 
         let decision = router::route(&host_owned, &path_owned, &self.state.cfg);
         *ctx = RequestCtx::new(decision, host_owned, path_owned, method.clone(), client_ip);
@@ -349,8 +370,15 @@ impl ProxyHttp for KineticProxy {
             uri     = ?session.req_header().uri,
             "proxy error: {}", e,
         );
-        if let Some(backend) = self.state.pool_for(ctx.upstream).find(&ctx.backend_addr) {
-            backend.breaker.record_failure();
+        // Hanya error UPSTREAM (backend benar-benar gagal) yang menghukum circuit
+        // breaker. Error DOWNSTREAM (client mutus koneksi: "ConnectionClosed",
+        // "H2 stream no longer needed", "Connection reset by peer") BUKAN salah
+        // backend — scanner/bot yang connect lalu putus tak boleh membuka breaker
+        // & merusak routing untuk user asli.
+        if e.esource == ErrorSource::Upstream {
+            if let Some(backend) = self.state.pool_for(ctx.upstream).find(&ctx.backend_addr) {
+                backend.breaker.record_failure();
+            }
         }
         match e.etype {
             ErrorType::ConnectTimedout
