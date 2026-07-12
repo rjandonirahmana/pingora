@@ -429,9 +429,20 @@ fn apply_cache(
     match ctx.route {
         RouteKind::Static => {
             if ctx.is_static {
-                // Static asset (punya ekstensi) — immutable, filename sudah ada content hash.
-                // Berlaku juga untuk .br/.gz variant karena is_static_path sudah cover keduanya.
-                resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
+                // Bundle Leptos di /pkg/ (e-ticketing.js / .wasm) TIDAK content-hashed
+                // — namanya stabil antar-deploy. `immutable` di file non-hashed = BUG:
+                // setelah deploy, browser tetap pakai JS/WASM lama dari cache padahal
+                // index.html (no-store) sudah baru → mismatch → hydration crash
+                // ("is not a function"). App memang set `no-cache` di /pkg/ (lihat
+                // pkg_no_cache di main.rs); proxy WAJIB menghormatinya, bukan menimpa
+                // dengan immutable. Revalidasi murah (304, tanpa body) via ETag.
+                if ctx.path.starts_with("/pkg/") {
+                    resp.insert_header("cache-control", "no-cache, must-revalidate")?;
+                } else {
+                    // Static asset lain (punya ekstensi) — immutable.
+                    // Berlaku juga untuk .br/.gz variant (is_static_path cover keduanya).
+                    resp.insert_header("cache-control", "public, max-age=31536000, immutable")?;
+                }
             } else {
                 // SPA route (/, /explore, dll) → serve index.html
                 // HARUS no-store: browser fetch ulang → dapat hash bundle terbaru
