@@ -460,6 +460,9 @@ fn apply_cache(
         RouteKind::Dashboard => {
             resp.insert_header("cache-control", "no-cache, must-revalidate")?;
         }
+        // PPM kelola Cache-Control sendiri (immutable /pkg ber-hash, no-cache HTML)
+        // — proxy JANGAN menimpa.
+        RouteKind::Ppm => {}
     }
     Ok(())
 }

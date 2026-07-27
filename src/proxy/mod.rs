@@ -48,6 +48,7 @@ pub struct ProxyState {
     pub frontend_pool: Arc<UpstreamPool>,
     pub s3_pool: Arc<UpstreamPool>,
     pub ui_pool: Arc<UpstreamPool>,
+    pub ppm_pool: Arc<UpstreamPool>,
     pub frontend_static: Option<Arc<StaticServe>>,
 }
 
@@ -59,6 +60,7 @@ impl ProxyState {
             Upstream::Frontend => &self.frontend_pool,
             Upstream::RustFS3 => &self.s3_pool,
             Upstream::RustFSUI => &self.ui_pool,
+            Upstream::Ppm => &self.ppm_pool,
         }
     }
 }
@@ -547,6 +549,7 @@ pub fn build_proxy_service(
         frontend_pool: Arc::new(UpstreamPool::single(cfg.frontend_addr.clone())),
         s3_pool: Arc::new(UpstreamPool::single(cfg.rustfs_s3_address.clone())),
         ui_pool: Arc::new(UpstreamPool::single(cfg.rustfs_ui_address.clone())),
+        ppm_pool: Arc::new(UpstreamPool::single(cfg.ppm_addr.clone())),
         frontend_static: cfg
             .frontend_dist_path
             .as_ref()

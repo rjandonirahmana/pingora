@@ -23,6 +23,9 @@ pub enum Upstream {
     RustFS3,
     /// RustFS Web Console (:9001) — via subdomain ui.ulalaapi.store
     RustFSUI,
+    /// PPM AFM — app Leptos SSR terpisah (satu binary: SSR + /api-fn + /pkg +
+    /// /api/rfid + SSE) via subdomain ppm.ulala.space → 127.0.0.1:3200.
+    Ppm,
 }
 
 impl Upstream {
@@ -107,6 +110,7 @@ impl Upstream {
             Upstream::Frontend => &cfg.frontend_addr,
             Upstream::RustFS3 => &cfg.rustfs_s3_address,
             Upstream::RustFSUI => &cfg.rustfs_ui_address,
+            Upstream::Ppm => &cfg.ppm_addr,
         }
     }
 }

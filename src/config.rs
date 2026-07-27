@@ -35,6 +35,16 @@ pub struct Config {
     #[serde(default = "default_frontend")]
     pub frontend_addr: String,
 
+    /// PPM AFM — domain (subdomain) + upstream. KOSONG = fitur nonaktif (rule
+    /// router tak pernah match → ulala.space tak terpengaruh). Isi mis.
+    /// "ppm.ulala.space" utk mengaktifkan. Cert TLS pakai fallthrough cert web
+    /// (WAJIB cert ulala.space mencakup subdomain: wildcard *.ulala.space ATAU
+    /// tambah SAN ppm.ulala.space via certbot).
+    #[serde(default)]
+    pub ppm_domain: String,
+    #[serde(default = "default_ppm_addr")]
+    pub ppm_addr: String,
+
     /// Field lama — diabaikan tapi tidak panic saat parse YAML lama.
     #[serde(default)]
     pub image_addr: Option<String>,
@@ -133,6 +143,8 @@ impl Config {
         env_str!("PROXY_FRONTEND", cfg.frontend_addr);
         env_str!("PROXY_WEB_DOMAIN", cfg.web_domain);
         env_str!("PROXY_API_DOMAIN", cfg.api_domain);
+        env_str!("PROXY_PPM_DOMAIN", cfg.ppm_domain);
+        env_str!("PROXY_PPM_ADDR", cfg.ppm_addr);
 
         macro_rules! env_opt {
             ($var:expr, $field:expr) => {
@@ -225,6 +237,8 @@ impl Default for Config {
             api_domain: default_api_domain(),
             backend_addr: default_backend(),
             frontend_addr: default_frontend(),
+            ppm_domain: String::new(),
+            ppm_addr: default_ppm_addr(),
             image_addr: None,
             upstream_pool_size: None,
             tls_cert_web: None,
@@ -262,6 +276,9 @@ fn default_backend() -> String {
 }
 fn default_frontend() -> String {
     "127.0.0.1:3100".into()
+}
+fn default_ppm_addr() -> String {
+    "127.0.0.1:3200".into()
 }
 fn default_cors_origins() -> Vec<String> {
     vec!["*".into()]

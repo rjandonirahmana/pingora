@@ -21,6 +21,16 @@ api_domain: "ulalaapi.store" # REST + WS + Image
 # ke service Axum sendiri, kembalikan ke 127.0.0.1:8080 dan jalankan service itu.
 backend_addr: "127.0.0.1:3100" # unified: sama dengan app SSR (dulu :8080 Axum terpisah — sudah tidak ada)
 frontend_addr: "127.0.0.1:3100" # Leptos SSR (docker -p 3100:3000)
+
+# ── PPM AFM (app Leptos SSR terpisah, subdomain) ──────────────────────────────
+# ppm.ulala.space → 127.0.0.1:3200 (docker -p 3200:3000). Semua path (SSR +
+# /api-fn + /pkg + /api/rfid + SSE) di-proxy ke app ppm. KOSONGKAN ppm_domain
+# untuk menonaktifkan (ulala.space tak terpengaruh).
+# TLS: memakai cert web (fallthrough SNI) → cert ulala.space WAJIB mencakup
+# subdomain ini (wildcard *.ulala.space ATAU tambah SAN ppm.ulala.space via
+# certbot: `certbot certonly --expand -d ulala.space -d www.ulala.space -d ppm.ulala.space`).
+ppm_domain: "ppm.ulala.space"
+ppm_addr: "127.0.0.1:3200"
 image_addr: "127.0.0.1:3902" # Garage S3 web UI
 rustfs_ui_address: "127.0.0.1:9001"
 rustfs_s3_address: "127.0.0.1:9000"

@@ -34,6 +34,10 @@ pub enum RouteKind {
     Static,
     Object,
     Dashboard,
+    /// PPM AFM (app Leptos SSR terpisah). BUKAN Static → CSP/COOP/MIME/cache
+    /// khusus-frontend ulala TIDAK diterapkan (ppm kelola sendiri + pakai
+    /// leptos/nonce). Timeout longgar utk SSE + siaran audio chunked.
+    Ppm,
 }
 
 impl RouteKind {
@@ -44,6 +48,7 @@ impl RouteKind {
             Upstream::Frontend => RouteKind::Static,
             Upstream::RustFS3 => RouteKind::Object,
             Upstream::RustFSUI => RouteKind::Dashboard,
+            Upstream::Ppm => RouteKind::Ppm,
         }
     }
 }
@@ -84,6 +89,13 @@ impl TimeoutConfig {
                 connect_secs: 5,
                 read_secs: 60,
                 write_secs: 30,
+            },
+            // PPM: SSE (/api/live-events) + siaran audio chunked (poll/download)
+            // bersifat long-lived → read/write longgar seperti Websocket.
+            RouteKind::Ppm => Self {
+                connect_secs: 10,
+                read_secs: 3600,
+                write_secs: 3600,
             },
         }
     }

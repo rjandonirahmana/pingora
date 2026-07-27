@@ -43,6 +43,21 @@ pub struct RouteDecision {
 pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
     let host = bare_host(host);
 
+    // ── 0. PPM AFM (ppm.ulala.space) — app terpisah, SEMUA path → Ppm ─────────
+    // Opt-in: hanya aktif bila cfg.ppm_domain diisi (kosong = fitur mati, tak
+    // pernah match). ppm = satu binary Leptos SSR (SSR + /api-fn + /pkg +
+    // /api/rfid + SSE), TIDAK pakai WebSocket → tak perlu split path. is_static
+    // = false → RouteKind::Ppm → CSP/MIME/cache khusus-frontend dilewati
+    // (ppm kelola MIME/cache/CSP sendiri + pakai leptos/nonce).
+    if !cfg.ppm_domain.is_empty() && host == cfg.ppm_domain.as_str() {
+        return RouteDecision {
+            upstream: Upstream::Ppm,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
     // ── 1-3. Web domain (ulala.space) ─────────────────────────────────────────
     if is_web_domain(host, cfg) {
         // BUG FIX: /api/ws/* → Backend WebSocket.
@@ -297,6 +312,43 @@ mod tests {
             Upstream::Frontend
         );
         assert!(route("ulala.space", "/static/app.js", &c).is_static);
+    }
+
+    // ── PPM (ppm.ulala.space) ─────────────────────────────────────────────────
+
+    fn cfg_ppm() -> Config {
+        Config {
+            ppm_domain: "ppm.ulala.space".into(),
+            ppm_addr: "127.0.0.1:3200".into(),
+            ..cfg()
+        }
+    }
+
+    #[test]
+    fn ppm_domain_semua_path_ke_ppm() {
+        let c = cfg_ppm();
+        // SSR, server-fn, asset, rfid, SSE — semua ke Ppm, tak ada split path.
+        for p in ["/", "/santri", "/api-fn/GetProfil", "/pkg/ppm.wasm", "/api/rfid/scan", "/api/live-events/9"] {
+            let d = route("ppm.ulala.space", p, &c);
+            assert_eq!(d.upstream, Upstream::Ppm, "path {p} harus ke Ppm");
+            assert!(!d.is_ws);
+            assert!(!d.is_static, "is_static harus false → CSP/cache frontend dilewati");
+        }
+        // Dengan port juga cocok.
+        assert_eq!(route("ppm.ulala.space:443", "/", &c).upstream, Upstream::Ppm);
+    }
+
+    #[test]
+    fn ppm_disabled_default_tak_pengaruhi_ulala() {
+        // ppm_domain KOSONG (default) → ppm.ulala.space TIDAK match → fallback
+        // Frontend (ulala.space tak terpengaruh sama sekali).
+        let c = cfg();
+        assert_eq!(c.ppm_domain, "");
+        assert_eq!(route("ppm.ulala.space", "/", &c).upstream, Upstream::Frontend);
+        // ulala.space tetap normal walau ppm aktif.
+        let cp = cfg_ppm();
+        assert_eq!(route("ulala.space", "/", &cp).upstream, Upstream::Frontend);
+        assert_eq!(route("ulala.space", "/api/x", &cp).upstream, Upstream::Backend);
     }
 
     // ── BUG FIX tests ─────────────────────────────────────────────────────────
