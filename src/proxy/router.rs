@@ -202,6 +202,12 @@ fn is_api_domain(host: &str, cfg: &Config) -> bool {
 /// Host asing (IP mentah, domain phishing) — tanpa ini rule fallback global
 /// (#10) meneruskannya ke Frontend :3100, membuang koneksi backend & memicu
 /// circuit breaker. Header `Host` yang kosong/hilang juga bukan host kita.
+///
+/// BUG FIX: ppm_domain WAJIB ikut di allowlist ini. is_known_host() dievaluasi
+/// di request_filter SEBELUM route(), jadi tanpa baris ppm di bawah setiap
+/// request ke ppm.ulala.space ditolak 421 Misdirected dan cabang PPM di route()
+/// (#0) tak pernah tercapai — walau ppm_domain sudah diisi di config.yaml.
+/// Sama seperti di route(): opt-in, hanya aktif bila ppm_domain tidak kosong.
 #[inline]
 pub fn is_known_host(host: &str, cfg: &Config) -> bool {
     let host = bare_host(host);
@@ -209,7 +215,8 @@ pub fn is_known_host(host: &str, cfg: &Config) -> bool {
         && (is_web_domain(host, cfg)
             || is_api_domain(host, cfg)
             || host == cfg.image_subdomain.as_str()
-            || host == cfg.ui_subdomain.as_str())
+            || host == cfg.ui_subdomain.as_str()
+            || (!cfg.ppm_domain.is_empty() && host == cfg.ppm_domain.as_str()))
 }
 
 #[inline]
@@ -336,6 +343,20 @@ mod tests {
         }
         // Dengan port juga cocok.
         assert_eq!(route("ppm.ulala.space:443", "/", &c).upstream, Upstream::Ppm);
+    }
+
+    /// Regresi: ppm.ulala.space pernah dibalas 421 Misdirected karena
+    /// is_known_host() (dicek di request_filter, SEBELUM route()) tak mengenal
+    /// ppm_domain — cabang PPM di route() jadi tak pernah tercapai.
+    #[test]
+    fn ppm_domain_lolos_allowlist_host() {
+        let c = cfg_ppm();
+        assert!(is_known_host("ppm.ulala.space", &c));
+        assert!(is_known_host("ppm.ulala.space:443", &c));
+        // Mati saat ppm_domain kosong — tetap opt-in, bukan subdomain bebas.
+        assert!(!is_known_host("ppm.ulala.space", &cfg()));
+        // Host asing berakhiran sama tetap ditolak.
+        assert!(!is_known_host("ppm.ulala.space.evil.com", &c));
     }
 
     #[test]
