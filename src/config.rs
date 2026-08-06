@@ -42,8 +42,25 @@ pub struct Config {
     /// tambah SAN ppm.ulala.space via certbot).
     #[serde(default)]
     pub ppm_domain: String,
+    /// Domain LAIN yang juga dilayani app PPM (alias). Berbeda dari
+    /// `ppm_domain`: alias di sini memakai cert web (fallthrough SNI), jadi
+    /// hanya cocok untuk subdomain yang sudah tercakup cert `web_domain` —
+    /// mis. "ppm.ulala.space" saat domain utamanya sudah pindah ke ppm-afm.com.
+    /// Domain utama punya certnya sendiri lewat `tls_cert_ppm`.
+    #[serde(default)]
+    pub ppm_domains: Vec<String>,
     #[serde(default = "default_ppm_addr")]
     pub ppm_addr: String,
+    /// Beberapa instans app PPM untuk LOAD BALANCING (round-robin + circuit
+    /// breaker, lihat proxy::upstream_pool). Kosong = pakai `ppm_addr` saja.
+    ///
+    /// PERINGATAN: cantumkan HANYA port yang benar-benar melayani. Alamat mati
+    /// tetap masuk giliran; tiap request yang jatuh ke sana membayar satu
+    /// percobaan gagal dulu (`fail_to_connect` hanya memberi SATU retry), jadi
+    /// dua alamat mati dari tiga = sebagian request berakhir 502 sampai
+    /// circuit breaker-nya membuka setelah 5 kegagalan.
+    #[serde(default)]
+    pub ppm_addrs: Vec<String>,
 
     /// Field lama — diabaikan tapi tidak panic saat parse YAML lama.
     #[serde(default)]
@@ -58,6 +75,12 @@ pub struct Config {
     pub tls_key_web: Option<String>,
     pub tls_cert_api: Option<String>,
     pub tls_key_api: Option<String>,
+    /// Cert untuk `ppm_domain` bila ia domain BERDIRI SENDIRI (mis.
+    /// ppm-afm.com), bukan subdomain `web_domain`. Kosong = pakai cert web
+    /// (benar hanya bila cert web mencakup domain itu sebagai SAN).
+    /// Cert ini harus mencakup `ppm_domain` DAN `www.{ppm_domain}`.
+    pub tls_cert_ppm: Option<String>,
+    pub tls_key_ppm: Option<String>,
 
     // ── CORS ──────────────────────────────────────────────────────────────────
     #[serde(default = "default_cors_origins")]
@@ -157,6 +180,8 @@ impl Config {
         env_opt!("PROXY_TLS_KEY_WEB", cfg.tls_key_web);
         env_opt!("PROXY_TLS_CERT_API", cfg.tls_cert_api);
         env_opt!("PROXY_TLS_KEY_API", cfg.tls_key_api);
+        env_opt!("PROXY_TLS_CERT_PPM", cfg.tls_cert_ppm);
+        env_opt!("PROXY_TLS_KEY_PPM", cfg.tls_key_ppm);
 
         if let Ok(v) = std::env::var("PROXY_RATE_LIMIT_RPS") {
             cfg.rate_limit_rps = v.parse().unwrap_or(cfg.rate_limit_rps);
@@ -168,6 +193,25 @@ impl Config {
         // 4. Validasi — log WARNING jelas jika TLS bermasalah
         cfg.validate();
         Ok(cfg)
+    }
+
+    /// Semua host yang dilayani app PPM: domain utama lebih dulu, lalu alias.
+    /// Yang kosong dibuang, jadi fitur PPM tetap opt-in (semua kosong = tak
+    /// pernah cocok).
+    pub fn ppm_hosts(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.ppm_domain.as_str())
+            .chain(self.ppm_domains.iter().map(String::as_str))
+            .filter(|h| !h.is_empty())
+    }
+
+    /// Daftar upstream PPM untuk pool. `ppm_addrs` menang; bila kosong, jatuh
+    /// ke `ppm_addr` tunggal supaya config lama tetap jalan apa adanya.
+    pub fn ppm_upstreams(&self) -> Vec<String> {
+        if self.ppm_addrs.is_empty() {
+            vec![self.ppm_addr.clone()]
+        } else {
+            self.ppm_addrs.clone()
+        }
     }
 
     /// Apakah TLS dikonfigurasi DAN cert file benar-benar ada di disk.
@@ -238,13 +282,17 @@ impl Default for Config {
             backend_addr: default_backend(),
             frontend_addr: default_frontend(),
             ppm_domain: String::new(),
+            ppm_domains: Vec::new(),
             ppm_addr: default_ppm_addr(),
+            ppm_addrs: Vec::new(),
             image_addr: None,
             upstream_pool_size: None,
             tls_cert_web: None,
             tls_key_web: None,
             tls_cert_api: None,
             tls_key_api: None,
+            tls_cert_ppm: None,
+            tls_key_ppm: None,
             cors_origins: default_cors_origins(),
             dev_origins: Vec::new(),
             image_cache_days: default_image_cache_days(),

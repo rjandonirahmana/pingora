@@ -535,6 +535,19 @@ impl ProxyHttp for RedirectProxy {
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
+/// Satu cert non-default beserta nama SNI yang boleh memakainya.
+///
+/// Nama dihitung sekali saat startup (bukan `format!` per handshake) karena
+/// callback SNI berjalan di jalur terpanas yang ada: tiap koneksi TLS baru.
+struct SniCert {
+    /// Nama persis (domain + www-nya).
+    exact: Vec<Box<str>>,
+    /// Akhiran ".domain" untuk mencakup seluruh subdomain — hanya diisi bila
+    /// certnya memang mencakup mereka.
+    suffix: Option<Box<str>>,
+    ctx: openssl::ssl::SslContext,
+}
+
 pub fn build_proxy_service(
     cfg: &Config,
     server: &mut Server,
@@ -549,7 +562,10 @@ pub fn build_proxy_service(
         frontend_pool: Arc::new(UpstreamPool::single(cfg.frontend_addr.clone())),
         s3_pool: Arc::new(UpstreamPool::single(cfg.rustfs_s3_address.clone())),
         ui_pool: Arc::new(UpstreamPool::single(cfg.rustfs_ui_address.clone())),
-        ppm_pool: Arc::new(UpstreamPool::single(cfg.ppm_addr.clone())),
+        // Bisa lebih dari satu instans app PPM: UpstreamPool sudah round-robin
+        // + circuit breaker per-alamat, jadi load balancing di sini cukup soal
+        // memberinya daftar, bukan kode penyeimbang baru.
+        ppm_pool: Arc::new(UpstreamPool::new(cfg.ppm_upstreams())),
         frontend_static: cfg
             .frontend_dist_path
             .as_ref()
@@ -583,10 +599,17 @@ pub fn build_proxy_service(
         //   ROLLBACK 1 baris kalau chat putus: comment baris enable_h2() di bawah.
         tls.enable_h2();
 
+        // ── Cert tambahan per-SNI ─────────────────────────────────────────────
+        // Cert web adalah default (fallthrough). Domain lain yang punya cert
+        // sendiri didaftarkan di sini; SNI yang tak cocok satu pun tetap
+        // dilayani cert web — itu yang membuat subdomain seperti
+        // ppm.ulala.space cukup menumpang SAN cert web.
+        let mut sni_certs: Vec<SniCert> = Vec::new();
+
         if let (Some(cert_api), Some(key_api)) = (cfg.tls_cert_api.clone(), cfg.tls_key_api.clone())
         {
             if std::path::Path::new(&cert_api).exists() && std::path::Path::new(&key_api).exists() {
-                use openssl::ssl::{NameType, SslAcceptor, SslFiletype, SslMethod};
+                use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
                 let mut api_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
                     .expect("API SslAcceptor gagal");
                 api_builder
@@ -613,31 +636,77 @@ pub fn build_proxy_service(
                 //         .ok_or(AlpnError::NOACK)
                 // });
 
-                let api_ctx = api_builder.build().into_context();
-
                 // Pre-compute SNI strings sekali saat startup — zero alloc per handshake.
-                let api_domain: Box<str> = cfg.api_domain.as_str().into();
-                let api_domain_www: Box<str> = format!("www.{}", cfg.api_domain).into();
-                let api_domain_sub: Box<str> = format!(".{}", cfg.api_domain).into();
-
-                tls.set_servername_callback(move |ssl, _| {
-                    if let Some(sni) = ssl.servername(NameType::HOST_NAME) {
-                        let matches = sni == &*api_domain
-                            || sni == &*api_domain_www
-                            || sni.ends_with(&*api_domain_sub);
-                        if matches {
-                            ssl.set_ssl_context(&api_ctx)
-                                .map_err(|_| openssl::ssl::SniError::NOACK)?;
-                        }
-                    }
-                    Ok(())
+                sni_certs.push(SniCert {
+                    exact: vec![
+                        cfg.api_domain.as_str().into(),
+                        format!("www.{}", cfg.api_domain).into(),
+                    ],
+                    // Semua subdomain api (image., ui.) ada di cert yang sama.
+                    suffix: Some(format!(".{}", cfg.api_domain).into()),
+                    ctx: api_builder.build().into_context(),
                 });
-                tracing::info!("SNI dual-cert: web={cert_web}, api={cert_api}");
+                tracing::info!("SNI cert api={cert_api}");
             } else {
                 tracing::warn!(
                     "TLS cert api tidak ditemukan di {cert_api} / {key_api} — hanya web TLS aktif"
                 );
             }
+        }
+
+        // ── Cert PPM (ppm-afm.com) ────────────────────────────────────────────
+        // Domain berdiri sendiri, jadi TIDAK bisa menumpang cert web seperti
+        // ppm.ulala.space dulu. Hanya domain UTAMA + www yang didaftarkan di
+        // sini: alias di `ppm_domains` sengaja jatuh ke cert web, karena
+        // cert ppm-afm.com tak mencakupnya dan menyajikannya ke sana justru
+        // membuat browser menolak koneksi.
+        if let (Some(cert_ppm), Some(key_ppm)) = (cfg.tls_cert_ppm.clone(), cfg.tls_key_ppm.clone())
+        {
+            if cfg.ppm_domain.is_empty() {
+                tracing::warn!("tls_cert_ppm diisi tapi ppm_domain kosong — cert PPM diabaikan");
+            } else if std::path::Path::new(&cert_ppm).exists()
+                && std::path::Path::new(&key_ppm).exists()
+            {
+                use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+                let mut b =
+                    SslAcceptor::mozilla_intermediate(SslMethod::tls()).expect("PPM SslAcceptor");
+                b.set_certificate_chain_file(&cert_ppm).expect("cert PPM");
+                b.set_private_key_file(&key_ppm, SslFiletype::PEM)
+                    .expect("key PPM");
+                sni_certs.push(SniCert {
+                    exact: vec![
+                        cfg.ppm_domain.as_str().into(),
+                        format!("www.{}", cfg.ppm_domain).into(),
+                    ],
+                    suffix: None,
+                    ctx: b.build().into_context(),
+                });
+                tracing::info!("SNI cert ppm={cert_ppm} (domain={})", cfg.ppm_domain);
+            } else {
+                tracing::warn!(
+                    "TLS cert ppm tidak ditemukan di {cert_ppm} / {key_ppm} — {} akan disajikan cert web (browser menolak)",
+                    cfg.ppm_domain
+                );
+            }
+        }
+
+        if !sni_certs.is_empty() {
+            use openssl::ssl::NameType;
+            tls.set_servername_callback(move |ssl, _| {
+                if let Some(sni) = ssl.servername(NameType::HOST_NAME) {
+                    for c in &sni_certs {
+                        let cocok = c.exact.iter().any(|d| &**d == sni)
+                            || c.suffix.as_deref().is_some_and(|s| sni.ends_with(s));
+                        if cocok {
+                            ssl.set_ssl_context(&c.ctx)
+                                .map_err(|_| openssl::ssl::SniError::NOACK)?;
+                            break;
+                        }
+                    }
+                }
+                // Tak ada yang cocok → biarkan cert web (default listener).
+                Ok(())
+            });
         }
 
         svc.add_tls_with_settings(&cfg.listen_addr, None, tls);

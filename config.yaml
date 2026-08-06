@@ -22,15 +22,38 @@ api_domain: "ulalaapi.store" # REST + WS + Image
 backend_addr: "127.0.0.1:3100" # unified: sama dengan app SSR (dulu :8080 Axum terpisah — sudah tidak ada)
 frontend_addr: "127.0.0.1:3100" # Leptos SSR (docker -p 3100:3000)
 
-# ── PPM AFM (app Leptos SSR terpisah, subdomain) ──────────────────────────────
-# ppm.ulala.space → 127.0.0.1:3200 (docker -p 3200:3000). Semua path (SSR +
-# /api-fn + /pkg + /api/rfid + SSE) di-proxy ke app ppm. KOSONGKAN ppm_domain
-# untuk menonaktifkan (ulala.space tak terpengaruh).
-# TLS: memakai cert web (fallthrough SNI) → cert ulala.space WAJIB mencakup
-# subdomain ini (wildcard *.ulala.space ATAU tambah SAN ppm.ulala.space via
-# certbot: `certbot certonly --expand -d ulala.space -d www.ulala.space -d ppm.ulala.space`).
-ppm_domain: "ppm.ulala.space"
+# ── PPM AFM (app Leptos SSR terpisah) ─────────────────────────────────────────
+# ppm-afm.com (+ www.) → 127.0.0.1:3200… Semua path (SSR + /api-fn + /pkg +
+# /api/rfid + SSE) di-proxy ke app ppm. KOSONGKAN ppm_domain untuk menonaktifkan
+# (ulala.space tak terpengaruh).
+#
+# Domain UTAMA punya cert sendiri (tls_cert_ppm di bawah) karena ppm-afm.com
+# bukan subdomain ulala.space — ia tak bisa menumpang SAN cert web.
+# ppm.ulala.space dipertahankan sebagai ALIAS: certnya sudah ada di cert web,
+# jadi ia jatuh ke fallthrough SNI seperti sebelumnya dan tautan lama tak mati.
+#
+# CATATAN CLOUDFLARE: ppm-afm.com memakai NS Cloudflare (proxied). Cloudflare
+# menyambung ke origin ini lewat :443 dengan SNI ppm-afm.com — karena itu cert
+# di bawah harus benar-benar terpasang, bukan sekadar cert web.
+ppm_domain: "ppm-afm.com"
+ppm_domains:
+  - "ppm.ulala.space"
+
+# Satu instans (dipakai bila ppm_addrs kosong).
 ppm_addr: "127.0.0.1:3200"
+
+# LOAD BALANCER app ppm — round-robin + circuit breaker per alamat.
+# Rencana 2–3 container: 3200, 3201, 3202 (docker -p 320X:3000).
+#
+# JANGAN membuka baris 3201/3202 sebelum containernya benar-benar jalan.
+# Alamat mati tetap kebagian giliran, dan satu request hanya dapat SATU retry
+# (proxy/mod.rs fail_to_connect) — dua alamat mati dari tiga berarti sebagian
+# pengunjung menerima 502 sampai circuit breaker-nya membuka (5 kegagalan,
+# cooldown 30 detik). Nyalakan containernya dulu, baru hapus komentarnya.
+ppm_addrs:
+  - "127.0.0.1:3200"
+  - "127.0.0.1:3201"
+  - "127.0.0.1:3202"
 image_addr: "127.0.0.1:3902" # Garage S3 web UI
 rustfs_ui_address: "127.0.0.1:9001"
 rustfs_s3_address: "127.0.0.1:9000"
@@ -51,6 +74,13 @@ tls_key_web: "/etc/letsencrypt/live/ulala.space/privkey.pem"
 # via `certbot certonly --standalone --expand -d ...` bila ada subdomain lain).
 tls_cert_api: "/etc/letsencrypt/live/ulalaapi.store/fullchain.pem"
 tls_key_api: "/etc/letsencrypt/live/ulalaapi.store/privkey.pem"
+
+# Cert domain PPM (ppm-afm.com + www.ppm-afm.com), diterbitkan certbot
+# standalone 6 Agu 2026. Perpanjangan otomatis memakai hook yang sudah ada:
+# pre/10-stop-proxy.sh membebaskan :80, post/10-start-proxy.sh menyalakan
+# kembali container — jadi proxy ikut restart dan membaca cert baru.
+tls_cert_ppm: "/etc/letsencrypt/live/ppm-afm.com/fullchain.pem"
+tls_key_ppm: "/etc/letsencrypt/live/ppm-afm.com/privkey.pem"
 
 # ── CORS (hanya berlaku untuk ulalaapi.store /api/*) ──────────────────────────
 cors_origins:

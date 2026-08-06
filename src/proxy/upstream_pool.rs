@@ -208,3 +208,73 @@ fn now_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool3() -> UpstreamPool {
+        UpstreamPool::new(vec![
+            "127.0.0.1:3200".into(),
+            "127.0.0.1:3201".into(),
+            "127.0.0.1:3202".into(),
+        ])
+    }
+
+    /// Inti load balancer: giliran berputar rata, bukan selalu backend pertama.
+    #[test]
+    fn round_robin_membagi_rata() {
+        let p = pool3();
+        let urutan: Vec<String> = (0..6).map(|_| p.next().unwrap().addr.to_string()).collect();
+        assert_eq!(
+            urutan,
+            vec![
+                "127.0.0.1:3200",
+                "127.0.0.1:3201",
+                "127.0.0.1:3202",
+                "127.0.0.1:3200",
+                "127.0.0.1:3201",
+                "127.0.0.1:3202",
+            ]
+        );
+    }
+
+    /// Backend yang jatuh dilewati — inti alasan LB ini aman dipakai bertiga.
+    #[test]
+    fn backend_mati_dilewati_setelah_ambang() {
+        let p = pool3();
+        let mati = p.find("127.0.0.1:3201").unwrap();
+        // Ambang breaker = 5 kegagalan.
+        for _ in 0..5 {
+            mati.breaker.record_failure();
+        }
+        assert_eq!(mati.breaker.state_name(), "open");
+        let terpakai: Vec<String> = (0..6).map(|_| p.next().unwrap().addr.to_string()).collect();
+        assert!(
+            !terpakai.iter().any(|a| a == "127.0.0.1:3201"),
+            "backend OPEN tak boleh kebagian giliran: {terpakai:?}"
+        );
+        // Yang sehat tetap keduanya, bukan satu saja.
+        assert!(terpakai.iter().any(|a| a == "127.0.0.1:3200"));
+        assert!(terpakai.iter().any(|a| a == "127.0.0.1:3202"));
+    }
+
+    /// Semua mati → tetap ada jawaban (backend[0]), bukan panik/None: lebih baik
+    /// mencoba dan gagal dengan 502 daripada menutup pintu sebelum mencoba.
+    #[test]
+    fn semua_mati_tetap_mengembalikan_sesuatu() {
+        let p = pool3();
+        for a in ["127.0.0.1:3200", "127.0.0.1:3201", "127.0.0.1:3202"] {
+            let b = p.find(a).unwrap();
+            for _ in 0..5 {
+                b.breaker.record_failure();
+            }
+        }
+        assert!(p.next().is_some());
+    }
+
+    #[test]
+    fn pool_kosong_tak_punya_backend() {
+        assert!(UpstreamPool::new(Vec::new()).next().is_none());
+    }
+}

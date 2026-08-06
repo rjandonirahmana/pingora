@@ -13,6 +13,7 @@
 //!   request ke pre-compressed variant mendapat cache policy dan MIME yang benar.
 //!
 //! Rule (first-match):
+//!   0. ppm_domain / ppm_domains (± www.)    → Ppm (semua path, satu binary SSR)
 //!   1. web_domain + /api/ws/*               → Backend (WebSocket, same-domain WS)
 //!   2. web_domain + /api/*                  → Backend (REST, relative URL support)
 //!   3. web_domain                            → Frontend
@@ -43,13 +44,13 @@ pub struct RouteDecision {
 pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
     let host = bare_host(host);
 
-    // ── 0. PPM AFM (ppm.ulala.space) — app terpisah, SEMUA path → Ppm ─────────
-    // Opt-in: hanya aktif bila cfg.ppm_domain diisi (kosong = fitur mati, tak
-    // pernah match). ppm = satu binary Leptos SSR (SSR + /api-fn + /pkg +
+    // ── 0. PPM AFM (ppm-afm.com + alias) — app terpisah, SEMUA path → Ppm ────
+    // Opt-in: hanya aktif bila cfg.ppm_domain/ppm_domains diisi (kosong = fitur
+    // mati, tak pernah match). ppm = satu binary Leptos SSR (SSR + /api-fn + /pkg +
     // /api/rfid + SSE), TIDAK pakai WebSocket → tak perlu split path. is_static
     // = false → RouteKind::Ppm → CSP/MIME/cache khusus-frontend dilewati
     // (ppm kelola MIME/cache/CSP sendiri + pakai leptos/nonce).
-    if !cfg.ppm_domain.is_empty() && host == cfg.ppm_domain.as_str() {
+    if is_ppm_domain(host, cfg) {
         return RouteDecision {
             upstream: Upstream::Ppm,
             strip_prefix: None,
@@ -197,6 +198,22 @@ fn is_api_domain(host: &str, cfg: &Config) -> bool {
             && host.ends_with(cfg.api_domain.as_str()))
 }
 
+/// True bila `host` dilayani app PPM — domain utama (`ppm_domain`) atau salah
+/// satu alias (`ppm_domains`), dengan atau tanpa awalan `www.`.
+///
+/// Awalan `www.` ikut dikenali karena `ppm_domain` kini bisa berupa domain
+/// berdiri sendiri (ppm-afm.com), bukan lagi subdomain seperti
+/// ppm.ulala.space: pendaftar domain lazim mengarahkan www ke tempat yang sama,
+/// dan certnya memang mencakup keduanya. Tetap opt-in — semua kosong berarti
+/// tak pernah cocok.
+#[inline]
+fn is_ppm_domain(host: &str, cfg: &Config) -> bool {
+    cfg.ppm_hosts().any(|d| {
+        host == d
+            || (host.len() == d.len() + 4 && host.starts_with("www.") && host.ends_with(d))
+    })
+}
+
 /// True bila `host` adalah salah satu domain yang KITA layani (web/api +
 /// subdomain storage). Dipakai untuk menolak scanner internet yang mengirim
 /// Host asing (IP mentah, domain phishing) — tanpa ini rule fallback global
@@ -216,7 +233,7 @@ pub fn is_known_host(host: &str, cfg: &Config) -> bool {
             || is_api_domain(host, cfg)
             || host == cfg.image_subdomain.as_str()
             || host == cfg.ui_subdomain.as_str()
-            || (!cfg.ppm_domain.is_empty() && host == cfg.ppm_domain.as_str()))
+            || is_ppm_domain(host, cfg))
 }
 
 #[inline]
@@ -329,6 +346,65 @@ mod tests {
             ppm_addr: "127.0.0.1:3200".into(),
             ..cfg()
         }
+    }
+
+    /// Susunan produksi sejak Agu 2026: domain berdiri sendiri + alias lama.
+    fn cfg_ppm_afm() -> Config {
+        Config {
+            ppm_domain: "ppm-afm.com".into(),
+            ppm_domains: vec!["ppm.ulala.space".into()],
+            ppm_addrs: vec![
+                "127.0.0.1:3200".into(),
+                "127.0.0.1:3201".into(),
+                "127.0.0.1:3202".into(),
+            ],
+            ..cfg()
+        }
+    }
+
+    #[test]
+    fn ppm_afm_domain_dan_www_ke_ppm() {
+        let c = cfg_ppm_afm();
+        for host in ["ppm-afm.com", "www.ppm-afm.com", "ppm-afm.com:443"] {
+            for p in ["/", "/santri", "/api-fn/GetProfil", "/pkg/ppm.wasm"] {
+                let d = route(host, p, &c);
+                assert_eq!(d.upstream, Upstream::Ppm, "{host}{p} harus ke Ppm");
+                assert!(!d.is_static, "CSP/cache frontend harus dilewati");
+            }
+            assert!(is_known_host(host, &c), "{host} harus lolos allowlist");
+        }
+    }
+
+    #[test]
+    fn ppm_alias_lama_tetap_hidup() {
+        // Tautan ppm.ulala.space tak boleh mati saat domain utama pindah.
+        let c = cfg_ppm_afm();
+        assert_eq!(route("ppm.ulala.space", "/", &c).upstream, Upstream::Ppm);
+        assert!(is_known_host("ppm.ulala.space", &c));
+        // Domain lain tetap seperti semula.
+        assert_eq!(route("ulala.space", "/", &c).upstream, Upstream::Frontend);
+        assert_eq!(route("ulalaapi.store", "/api/x", &c).upstream, Upstream::Backend);
+    }
+
+    #[test]
+    fn ppm_host_mirip_tetap_ditolak() {
+        let c = cfg_ppm_afm();
+        // Akhiran yang kebetulan sama bukan domain kita.
+        assert!(!is_known_host("ppm-afm.com.evil.com", &c));
+        assert!(!is_known_host("evil-ppm-afm.com", &c));
+        // "www." hanya sah untuk domain penuh, bukan potongan.
+        assert!(!is_known_host("www.evilppm-afm.com", &c));
+    }
+
+    #[test]
+    fn ppm_upstreams_daftar_atau_tunggal() {
+        // Daftar diisi → dipakai apa adanya (bahan load balancer).
+        assert_eq!(
+            cfg_ppm_afm().ppm_upstreams(),
+            vec!["127.0.0.1:3200", "127.0.0.1:3201", "127.0.0.1:3202"]
+        );
+        // Kosong → jatuh ke ppm_addr tunggal (config lama tetap jalan).
+        assert_eq!(cfg_ppm().ppm_upstreams(), vec!["127.0.0.1:3200"]);
     }
 
     #[test]
