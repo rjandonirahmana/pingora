@@ -88,6 +88,7 @@ cors_origins:
   - "https://www.ulala.space"
   - "https://image.ulalaapi.store"
   - "https://ui.ulalaapi.store"
+  - "https://ppm-afm.com"
 
 # ── Image cache ───────────────────────────────────────────────────────────────
 image_cache_days: 30
