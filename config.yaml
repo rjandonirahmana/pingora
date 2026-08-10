@@ -57,6 +57,29 @@ ppm_addrs:
 image_addr: "127.0.0.1:3902" # Garage S3 web UI
 rustfs_ui_address: "127.0.0.1:9001"
 rustfs_s3_address: "127.0.0.1:9000"
+
+# ── Host tambahan di domain PPM ───────────────────────────────────────────────
+# Host PENUH, bukan awalannya — memindahkannya ke domain lain cukup mengubah
+# baris ini. Kosongkan untuk menonaktifkan (rulenya tak pernah cocok).
+#
+# WAJIB DILAKUKAN DI LUAR KODE sebelum ketiganya berfungsi:
+#   1. DNS  — arahkan ketiga nama ke IP server ini (A record). Bila ppm-afm.com
+#             memakai Cloudflare proxied, subdomainnya harus proxied juga.
+#   2. CERT — HTTP-01 tidak bisa wildcard, jadi tiap nama disebut eksplisit:
+#             certbot certonly --standalone --expand \
+#               -d ppm-afm.com -d www.ppm-afm.com \
+#               -d wa-admin.ppm-afm.com -d image-s3.ppm-afm.com -d ui-s3.ppm-afm.com
+#             (hook pre/post yang sudah ada membebaskan :80 & menyalakan proxy lagi)
+#
+# Panel admin WhatsApp — app terpisah di :3000.
+wa_admin_domain: "wa-admin.ppm-afm.com"
+wa_admin_addr: "127.0.0.1:3000"
+
+# Nama host KEDUA untuk RustFS yang SAMA (rustfs_s3_address / rustfs_ui_address
+# di atas) — bukan instans baru. Gunanya supaya aplikasi di domain ppm-afm.com
+# tak perlu menyebut ulalaapi.store untuk mengambil berkasnya sendiri.
+image_s3_subdomain: "image-s3.ppm-afm.com" # → :9000 (S3 API)
+ui_s3_subdomain: "ui-s3.ppm-afm.com" # → :9001 (console)
 # ── Mode Deploy Frontend (pilih salah satu) ───────────────────────────────────
 # MODE A (aktif): Proxy ke static-web-server :3100
 #   WASM MIME dipastikan benar oleh proxy layer (application/wasm).

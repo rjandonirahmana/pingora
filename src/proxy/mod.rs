@@ -49,6 +49,7 @@ pub struct ProxyState {
     pub s3_pool: Arc<UpstreamPool>,
     pub ui_pool: Arc<UpstreamPool>,
     pub ppm_pool: Arc<UpstreamPool>,
+    pub wa_admin_pool: Arc<UpstreamPool>,
     pub frontend_static: Option<Arc<StaticServe>>,
 }
 
@@ -61,6 +62,7 @@ impl ProxyState {
             Upstream::RustFS3 => &self.s3_pool,
             Upstream::RustFSUI => &self.ui_pool,
             Upstream::Ppm => &self.ppm_pool,
+            Upstream::WaAdmin => &self.wa_admin_pool,
         }
     }
 }
@@ -566,6 +568,7 @@ pub fn build_proxy_service(
         // + circuit breaker per-alamat, jadi load balancing di sini cukup soal
         // memberinya daftar, bukan kode penyeimbang baru.
         ppm_pool: Arc::new(UpstreamPool::new(cfg.ppm_upstreams())),
+        wa_admin_pool: Arc::new(UpstreamPool::single(cfg.wa_admin_addr.clone())),
         frontend_static: cfg
             .frontend_dist_path
             .as_ref()
@@ -673,15 +676,41 @@ pub fn build_proxy_service(
                 b.set_certificate_chain_file(&cert_ppm).expect("cert PPM");
                 b.set_private_key_file(&key_ppm, SslFiletype::PEM)
                     .expect("key PPM");
+                // Host tambahan (panel WA, endpoint S3/console) ikut disajikan
+                // cert PPM — mereka subdomain domain yang sama, jadi certnya
+                // memang cert ini. Tanpa didaftarkan di sini, SNI-nya jatuh ke
+                // cert web (ulala.space) dan browser menolak koneksi dengan
+                // ERR_CERT_COMMON_NAME_INVALID sebelum satu byte pun di-proxy.
+                //
+                // SYARATNYA cert itu benar-benar mencakup nama-nama ini:
+                //   certbot certonly --standalone --expand -d ppm-afm.com \
+                //     -d www.ppm-afm.com -d wa-admin.ppm-afm.com \
+                //     -d image-s3.ppm-afm.com -d ui-s3.ppm-afm.com
+                // HTTP-01 tak bisa wildcard, jadi tiap nama harus disebut.
+                let mut exact: Vec<Box<str>> = vec![
+                    cfg.ppm_domain.as_str().into(),
+                    format!("www.{}", cfg.ppm_domain).into(),
+                ];
+                for tambahan in [
+                    &cfg.wa_admin_domain,
+                    &cfg.image_s3_subdomain,
+                    &cfg.ui_s3_subdomain,
+                ] {
+                    // Hanya yang benar-benar subdomain ppm_domain. Host di
+                    // domain lain punya certnya sendiri; menyajikannya cert ini
+                    // sama saja dengan tak menyajikan apa pun.
+                    if !tambahan.is_empty()
+                        && tambahan.ends_with(&format!(".{}", cfg.ppm_domain))
+                    {
+                        exact.push(tambahan.as_str().into());
+                    }
+                }
+                tracing::info!("SNI cert ppm={cert_ppm} untuk {exact:?}");
                 sni_certs.push(SniCert {
-                    exact: vec![
-                        cfg.ppm_domain.as_str().into(),
-                        format!("www.{}", cfg.ppm_domain).into(),
-                    ],
+                    exact,
                     suffix: None,
                     ctx: b.build().into_context(),
                 });
-                tracing::info!("SNI cert ppm={cert_ppm} (domain={})", cfg.ppm_domain);
             } else {
                 tracing::warn!(
                     "TLS cert ppm tidak ditemukan di {cert_ppm} / {key_ppm} — {} akan disajikan cert web (browser menolak)",

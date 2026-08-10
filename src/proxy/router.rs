@@ -50,6 +50,44 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
     // /api/rfid + SSE), TIDAK pakai WebSocket → tak perlu split path. is_static
     // = false → RouteKind::Ppm → CSP/MIME/cache khusus-frontend dilewati
     // (ppm kelola MIME/cache/CSP sendiri + pakai leptos/nonce).
+    // ── 0a. Host tambahan pada domain PPM ────────────────────────────────────
+    // Dievaluasi SEBELUM rule PPM. Fungsional keduanya tak bertabrakan
+    // (`is_ppm_domain` mencocokkan nama persis + `www.`, bukan sembarang
+    // subdomain), tapi yang lebih spesifik ditaruh lebih dulu supaya urutan
+    // bacanya sama dengan urutan berpikirnya.
+    //
+    // Ketiganya opt-in: `cocok_host` mengembalikan false untuk konfigurasi
+    // kosong, jadi proxy yang tak memakainya tak berubah perilakunya.
+    if cocok_host(host, &cfg.wa_admin_domain) {
+        return RouteDecision {
+            upstream: Upstream::WaAdmin,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
+    // Nama host KEDUA menuju RustFS yang sama — bukan penyimpanan baru. Karena
+    // itu tak ada `strip_prefix`: request datang dengan path S3 apa adanya,
+    // persis seperti image./ui.ulalaapi.store.
+    if cocok_host(host, &cfg.image_s3_subdomain) {
+        return RouteDecision {
+            upstream: Upstream::RustFS3,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
+    if cocok_host(host, &cfg.ui_s3_subdomain) {
+        return RouteDecision {
+            upstream: Upstream::RustFSUI,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
     if is_ppm_domain(host, cfg) {
         return RouteDecision {
             upstream: Upstream::Ppm,
@@ -206,6 +244,16 @@ fn is_api_domain(host: &str, cfg: &Config) -> bool {
 /// ppm.ulala.space: pendaftar domain lazim mengarahkan www ke tempat yang sama,
 /// dan certnya memang mencakup keduanya. Tetap opt-in — semua kosong berarti
 /// tak pernah cocok.
+/// Cocokkan host terhadap satu nama yang boleh KOSONG (fitur opt-in).
+///
+/// Nama kosong WAJIB tak pernah cocok. Tanpa penjagaan itu sebuah field yang
+/// tak diisi akan cocok dengan Host kosong — dan karena `is_known_host`
+/// memakai fungsi yang sama, request tanpa header Host mendadak dianggap sah.
+#[inline]
+fn cocok_host(host: &str, nama: &str) -> bool {
+    !nama.is_empty() && host == nama
+}
+
 #[inline]
 fn is_ppm_domain(host: &str, cfg: &Config) -> bool {
     cfg.ppm_hosts().any(|d| {
@@ -225,6 +273,13 @@ fn is_ppm_domain(host: &str, cfg: &Config) -> bool {
 /// request ke ppm.ulala.space ditolak 421 Misdirected dan cabang PPM di route()
 /// (#0) tak pernah tercapai — walau ppm_domain sudah diisi di config.yaml.
 /// Sama seperti di route(): opt-in, hanya aktif bila ppm_domain tidak kosong.
+///
+/// ATURAN YANG BERLAKU UNTUK SETIAP HOST BARU: tambahkan di DUA tempat —
+/// `route()` DAN di sini. Menambah rule routing saja menghasilkan 421 yang
+/// membingungkan, karena gerbang ini berdiri lebih dulu dan rulenya tak pernah
+/// tersentuh. Itu sudah terjadi sekali (ppm.ulala.space, 4 Agu 2026), dan
+/// `wa_admin`/`image_s3`/`ui_s3` di bawah adalah penerapan pelajaran yang sama.
+/// Dikunci test `host_baru_lolos_allowlist`.
 #[inline]
 pub fn is_known_host(host: &str, cfg: &Config) -> bool {
     let host = bare_host(host);
@@ -233,7 +288,10 @@ pub fn is_known_host(host: &str, cfg: &Config) -> bool {
             || is_api_domain(host, cfg)
             || host == cfg.image_subdomain.as_str()
             || host == cfg.ui_subdomain.as_str()
-            || is_ppm_domain(host, cfg))
+            || is_ppm_domain(host, cfg)
+            || cocok_host(host, &cfg.wa_admin_domain)
+            || cocok_host(host, &cfg.image_s3_subdomain)
+            || cocok_host(host, &cfg.ui_s3_subdomain))
 }
 
 #[inline]
@@ -424,6 +482,84 @@ mod tests {
     /// Regresi: ppm.ulala.space pernah dibalas 421 Misdirected karena
     /// is_known_host() (dicek di request_filter, SEBELUM route()) tak mengenal
     /// ppm_domain — cabang PPM di route() jadi tak pernah tercapai.
+    /// Susunan produksi Agu 2026: tiga host tambahan di domain PPM.
+    fn cfg_host_tambahan() -> Config {
+        Config {
+            wa_admin_domain: "wa-admin.ppm-afm.com".into(),
+            wa_admin_addr: "127.0.0.1:3000".into(),
+            image_s3_subdomain: "image-s3.ppm-afm.com".into(),
+            ui_s3_subdomain: "ui-s3.ppm-afm.com".into(),
+            ..cfg_ppm_afm()
+        }
+    }
+
+    #[test]
+    fn wa_admin_semua_path_ke_wa_admin() {
+        let c = cfg_host_tambahan();
+        for host in ["wa-admin.ppm-afm.com", "wa-admin.ppm-afm.com:443"] {
+            for p in ["/", "/dashboard", "/api/sessions", "/assets/app.js"] {
+                let d = route(host, p, &c);
+                assert_eq!(d.upstream, Upstream::WaAdmin, "{host}{p}");
+                assert!(!d.is_static, "header frontend ulala tak boleh diterapkan");
+            }
+        }
+        assert_eq!(Upstream::WaAdmin.addr(&c), "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn host_s3_kedua_ke_rustfs_yang_sama() {
+        let c = cfg_host_tambahan();
+        // image-s3 → S3 API :9000, TANPA strip prefix (path S3 apa adanya).
+        let d = route("image-s3.ppm-afm.com", "/ppm/rekaman/a.webm", &c);
+        assert_eq!(d.upstream, Upstream::RustFS3);
+        assert!(d.strip_prefix.is_none(), "path S3 tak boleh dipotong");
+        // ui-s3 → console :9001.
+        assert_eq!(
+            route("ui-s3.ppm-afm.com", "/", &c).upstream,
+            Upstream::RustFSUI
+        );
+        // Alamatnya memang RustFS yang sudah ada, bukan instans baru.
+        assert_eq!(Upstream::RustFS3.addr(&c), c.rustfs_s3_address);
+        assert_eq!(Upstream::RustFSUI.addr(&c), c.rustfs_ui_address);
+    }
+
+    /// Jebakan yang sudah menggigit sekali (ppm.ulala.space, 4 Agu 2026):
+    /// `is_known_host` berdiri SEBELUM `route()`, jadi host yang punya rule
+    /// tapi tak ada di allowlist dijawab 421 dan rulenya tak pernah tersentuh.
+    #[test]
+    fn host_baru_lolos_allowlist() {
+        let c = cfg_host_tambahan();
+        for h in [
+            "wa-admin.ppm-afm.com",
+            "image-s3.ppm-afm.com",
+            "ui-s3.ppm-afm.com",
+            "wa-admin.ppm-afm.com:443",
+        ] {
+            assert!(is_known_host(h, &c), "{h} harus lolos allowlist (bukan 421)");
+        }
+    }
+
+    #[test]
+    fn host_tambahan_opt_in_dan_tak_menyerap_domain_induk() {
+        // Kosong (default) → tak pernah cocok; ppm-afm.com biasa tak terganggu.
+        let mati = cfg_ppm_afm();
+        assert!(!is_known_host("wa-admin.ppm-afm.com", &mati));
+        assert_eq!(
+            route("wa-admin.ppm-afm.com", "/", &mati).upstream,
+            Upstream::Frontend,
+            "tanpa konfigurasi, host itu jatuh ke fallback biasa"
+        );
+
+        // Aktif → domain induk & aliasnya TETAP ke Ppm, tak tertelan rule baru.
+        let c = cfg_host_tambahan();
+        for h in ["ppm-afm.com", "www.ppm-afm.com", "ppm.ulala.space"] {
+            assert_eq!(route(h, "/", &c).upstream, Upstream::Ppm, "{h}");
+        }
+        // Nama mirip tetap ditolak — pencocokannya persis, bukan akhiran.
+        assert!(!is_known_host("wa-admin.ppm-afm.com.evil.com", &c));
+        assert!(!is_known_host("evil-wa-admin.ppm-afm.com", &c));
+    }
+
     #[test]
     fn ppm_domain_lolos_allowlist_host() {
         let c = cfg_ppm();

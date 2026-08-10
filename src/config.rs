@@ -110,6 +110,27 @@ pub struct Config {
     #[serde(default = "default_ui_subdomain")]
     pub ui_subdomain: String,
 
+    // ── Host tambahan pada domain PPM ─────────────────────────────────────────
+    // Ketiganya OPT-IN: kosong = tak pernah cocok, persis pola `ppm_domain`.
+    // Host penuh ditulis di config.yaml (bukan hanya awalannya) supaya
+    // memindahkannya ke domain lain tak perlu menyentuh kode sama sekali.
+    /// Panel admin WhatsApp — host sendiri → [`Config::wa_admin_addr`].
+    #[serde(default)]
+    pub wa_admin_domain: String,
+
+    #[serde(default = "default_wa_admin_addr")]
+    pub wa_admin_addr: String,
+
+    /// Endpoint S3 KEDUA untuk RustFS yang sama (`rustfs_s3_address`).
+    /// Bukan instans baru — hanya nama host lain menuju penyimpanan yang sama,
+    /// supaya aplikasi di domain PPM tak perlu menyebut ulalaapi.store.
+    #[serde(default)]
+    pub image_s3_subdomain: String,
+
+    /// Console RustFS KEDUA (`rustfs_ui_address`) — lihat catatan di atas.
+    #[serde(default)]
+    pub ui_s3_subdomain: String,
+
     #[serde(default)]
     pub frontend_dist_path: Option<String>,
 
@@ -300,6 +321,10 @@ impl Default for Config {
             rustfs_s3_address: default_rustfs_s3(),
             rustfs_ui_address: default_rustfs_ui(),
             image_subdomain: default_image_subdomain(),
+            wa_admin_domain: String::new(),
+            wa_admin_addr: default_wa_admin_addr(),
+            image_s3_subdomain: String::new(),
+            ui_s3_subdomain: String::new(),
             ui_subdomain: default_ui_subdomain(),
             frontend_dist_path: None,
             csp_header: build_csp_header(&default_api_domain()),
@@ -342,6 +367,9 @@ fn default_rustfs_ui() -> String {
 }
 fn default_rustfs_s3() -> String {
     "127.0.0.1:9000".into()
+}
+fn default_wa_admin_addr() -> String {
+    "127.0.0.1:3000".into()
 }
 fn default_ui_subdomain() -> String {
     "ui.ulalaapi.store".into()

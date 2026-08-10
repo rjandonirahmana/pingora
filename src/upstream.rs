@@ -26,6 +26,8 @@ pub enum Upstream {
     /// PPM AFM — app Leptos SSR terpisah (satu binary: SSR + /api-fn + /pkg +
     /// /api/rfid + SSE) via subdomain ppm.ulala.space → 127.0.0.1:3200.
     Ppm,
+    /// Panel admin WhatsApp (:3000) — host sendiri, semua path.
+    WaAdmin,
 }
 
 impl Upstream {
@@ -111,6 +113,7 @@ impl Upstream {
             Upstream::RustFS3 => &cfg.rustfs_s3_address,
             Upstream::RustFSUI => &cfg.rustfs_ui_address,
             Upstream::Ppm => &cfg.ppm_addr,
+            Upstream::WaAdmin => &cfg.wa_admin_addr,
         }
     }
 }

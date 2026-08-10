@@ -38,6 +38,9 @@ pub enum RouteKind {
     /// khusus-frontend ulala TIDAK diterapkan (ppm kelola sendiri + pakai
     /// leptos/nonce). Timeout longgar utk SSE + siaran audio chunked.
     Ppm,
+    /// Panel admin WhatsApp — diperlakukan sama dengan [`RouteKind::Ppm`]:
+    /// jangan disentuh header frontend-nya, dan beri timeout longgar.
+    WaAdmin,
 }
 
 impl RouteKind {
@@ -49,6 +52,10 @@ impl RouteKind {
             Upstream::RustFS3 => RouteKind::Object,
             Upstream::RustFSUI => RouteKind::Dashboard,
             Upstream::Ppm => RouteKind::Ppm,
+            // Panel admin WA disamakan dengan PPM: sama-sama aplikasi pihak
+            // lain yang mengurus MIME/cache/CSP-nya sendiri, dan dasbornya
+            // lazim memakai koneksi panjang (polling status sesi WhatsApp).
+            Upstream::WaAdmin => RouteKind::WaAdmin,
         }
     }
 }
@@ -92,7 +99,7 @@ impl TimeoutConfig {
             },
             // PPM: SSE (/api/live-events) + siaran audio chunked (poll/download)
             // bersifat long-lived → read/write longgar seperti Websocket.
-            RouteKind::Ppm => Self {
+            RouteKind::Ppm | RouteKind::WaAdmin => Self {
                 connect_secs: 10,
                 read_secs: 3600,
                 write_secs: 3600,
