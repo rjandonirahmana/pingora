@@ -75,6 +75,28 @@ rustfs_s3_address: "127.0.0.1:9000"
 wa_admin_domain: "wa-admin.ppm-afm.com"
 wa_admin_addr: "127.0.0.1:3000"
 
+# ── Gitea (git.ulala.space) ───────────────────────────────────────────────────
+# Container Gitea: docker -p 3300:3000 (port 3000 di host sudah dipakai panel WA).
+#
+# WAJIB DILAKUKAN DI LUAR KODE:
+#   1. DNS  — A record git.ulala.space → IP server ini.
+#   2. CERT — git.ulala.space bukan subdomain yang sudah ada di SAN cert web,
+#             jadi certnya harus diperluas EKSPLISIT (HTTP-01 tak bisa wildcard):
+#               certbot certonly --standalone --expand \
+#                 -d ulala.space -d www.ulala.space -d git.ulala.space
+#             Hook pre/post yang sudah ada membebaskan :80 lalu menyalakan proxy
+#             kembali, jadi tak ada langkah manual tambahan.
+#
+#             ⚠️ SEBUTKAN ULANG SEMUA domain lama pada perintah di atas.
+#             `--expand` menerbitkan cert BARU berisi persis daftar -d yang
+#             diberikan; menyebut git.ulala.space saja akan MENGGANTIKAN cert
+#             ulala.space dengan yang hanya memuat git — dan situs utama mati.
+#
+# Git-over-SSH TIDAK lewat sini (pingora = HTTP, SSH = TCP mentah). Ia memakai
+# port 2222 langsung ke container; buka port itu di firewall.
+gitea_domain: "git.ulala.space"
+gitea_addr: "127.0.0.1:3300"
+
 # Nama host KEDUA untuk RustFS yang SAMA (rustfs_s3_address / rustfs_ui_address
 # di atas) — bukan instans baru. Gunanya supaya aplikasi di domain ppm-afm.com
 # tak perlu menyebut ulalaapi.store untuk mengambil berkasnya sendiri.

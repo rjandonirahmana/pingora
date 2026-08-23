@@ -28,6 +28,9 @@ pub enum Upstream {
     Ppm,
     /// Panel admin WhatsApp (:3000) — host sendiri, semua path.
     WaAdmin,
+    /// Gitea (:3300) — host sendiri, semua path. Hanya Git-over-HTTPS + web UI;
+    /// Git-over-SSH memakai port 2222 langsung, tak lewat proxy ini.
+    Gitea,
 }
 
 impl Upstream {
@@ -114,6 +117,7 @@ impl Upstream {
             Upstream::RustFSUI => &cfg.rustfs_ui_address,
             Upstream::Ppm => &cfg.ppm_addr,
             Upstream::WaAdmin => &cfg.wa_admin_addr,
+            Upstream::Gitea => &cfg.gitea_addr,
         }
     }
 }

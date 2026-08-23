@@ -462,7 +462,7 @@ fn apply_cache(
         }
         // PPM kelola Cache-Control sendiri (immutable /pkg ber-hash, no-cache HTML)
         // — proxy JANGAN menimpa.
-        RouteKind::Ppm | RouteKind::WaAdmin => {}
+        RouteKind::Ppm | RouteKind::WaAdmin | RouteKind::Gitea => {}
     }
     Ok(())
 }

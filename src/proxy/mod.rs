@@ -50,6 +50,7 @@ pub struct ProxyState {
     pub ui_pool: Arc<UpstreamPool>,
     pub ppm_pool: Arc<UpstreamPool>,
     pub wa_admin_pool: Arc<UpstreamPool>,
+    pub gitea_pool: Arc<UpstreamPool>,
     pub frontend_static: Option<Arc<StaticServe>>,
 }
 
@@ -63,6 +64,7 @@ impl ProxyState {
             Upstream::RustFSUI => &self.ui_pool,
             Upstream::Ppm => &self.ppm_pool,
             Upstream::WaAdmin => &self.wa_admin_pool,
+            Upstream::Gitea => &self.gitea_pool,
         }
     }
 }
@@ -569,6 +571,7 @@ pub fn build_proxy_service(
         // memberinya daftar, bukan kode penyeimbang baru.
         ppm_pool: Arc::new(UpstreamPool::new(cfg.ppm_upstreams())),
         wa_admin_pool: Arc::new(UpstreamPool::single(cfg.wa_admin_addr.clone())),
+        gitea_pool: Arc::new(UpstreamPool::single(cfg.gitea_addr.clone())),
         frontend_static: cfg
             .frontend_dist_path
             .as_ref()

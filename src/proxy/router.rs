@@ -58,6 +58,17 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
     //
     // Ketiganya opt-in: `cocok_host` mengembalikan false untuk konfigurasi
     // kosong, jadi proxy yang tak memakainya tak berubah perilakunya.
+    // Gitea — host sendiri, SEMUA path (web UI + Git-over-HTTPS). Tak ada
+    // strip_prefix: Git menuntut path apa adanya (`/user/repo.git/info/refs`).
+    if cocok_host(host, &cfg.gitea_domain) {
+        return RouteDecision {
+            upstream: Upstream::Gitea,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
     if cocok_host(host, &cfg.wa_admin_domain) {
         return RouteDecision {
             upstream: Upstream::WaAdmin,
@@ -290,6 +301,7 @@ pub fn is_known_host(host: &str, cfg: &Config) -> bool {
             || host == cfg.ui_subdomain.as_str()
             || is_ppm_domain(host, cfg)
             || cocok_host(host, &cfg.wa_admin_domain)
+            || cocok_host(host, &cfg.gitea_domain)
             || cocok_host(host, &cfg.image_s3_subdomain)
             || cocok_host(host, &cfg.ui_s3_subdomain))
 }
@@ -491,6 +503,70 @@ mod tests {
             ui_s3_subdomain: "ui-s3.ppm-afm.com".into(),
             ..cfg_ppm_afm()
         }
+    }
+
+    fn cfg_gitea() -> Config {
+        Config {
+            gitea_domain: "git.ulala.space".into(),
+            gitea_addr: "127.0.0.1:3300".into(),
+            ..cfg_host_tambahan()
+        }
+    }
+
+    /// SEMUA path di host Gitea menuju Gitea — termasuk endpoint Git yang
+    /// bentuknya asing (`/user/repo.git/info/refs`, `/git-upload-pack`).
+    /// Path TIDAK boleh dipotong: Git menuntutnya apa adanya.
+    #[test]
+    fn gitea_semua_path_ke_gitea() {
+        let c = cfg_gitea();
+        for host in ["git.ulala.space", "git.ulala.space:443"] {
+            for p in [
+                "/",
+                "/explore/repos",
+                "/rjandoni/e-ticketing.git/info/refs?service=git-upload-pack",
+                "/rjandoni/e-ticketing.git/git-receive-pack",
+                "/assets/js/index.js",
+                "/api/v1/version",
+            ] {
+                let d = route(host, p, &c);
+                assert_eq!(d.upstream, Upstream::Gitea, "{host}{p}");
+                assert!(d.strip_prefix.is_none(), "path Git tak boleh dipotong");
+                assert!(!d.is_static, "header frontend ulala tak boleh diterapkan");
+            }
+        }
+        assert_eq!(Upstream::Gitea.addr(&c), "127.0.0.1:3300");
+    }
+
+    /// REGRESI (bug 421, Agu 2026): domain baru yang tak terdaftar di
+    /// `is_known_host` ditolak SEBELUM `route()` sempat dipanggil — rutenya
+    /// benar tapi tak pernah tercapai. Host Gitea harus dikenali.
+    #[test]
+    fn gitea_dikenali_is_known_host() {
+        let c = cfg_gitea();
+        assert!(is_known_host("git.ulala.space", &c));
+        assert!(is_known_host("git.ulala.space:443", &c));
+    }
+
+    /// Fitur ini OPT-IN: konfigurasi kosong tak boleh menangkap host apa pun.
+    /// Tanpa penjaga ini, `cocok_host("", "")` yang bernilai true akan membuat
+    /// setiap request tanpa Host jatuh ke Gitea.
+    #[test]
+    fn gitea_kosong_tak_pernah_cocok() {
+        let c = cfg_host_tambahan(); // gitea_domain = "" (bawaan)
+        assert!(!is_known_host("git.ulala.space", &c));
+        assert_ne!(route("git.ulala.space", "/", &c).upstream, Upstream::Gitea);
+    }
+
+    /// Host Gitea tak boleh mencuri trafik domain utama, dan sebaliknya.
+    #[test]
+    fn gitea_tak_bertabrakan_dengan_domain_lain() {
+        let c = cfg_gitea();
+        assert_ne!(route("ulala.space", "/", &c).upstream, Upstream::Gitea);
+        assert_ne!(route("ppm-afm.com", "/", &c).upstream, Upstream::Gitea);
+        assert_ne!(
+            route("wa-admin.ppm-afm.com", "/", &c).upstream,
+            Upstream::Gitea
+        );
     }
 
     #[test]

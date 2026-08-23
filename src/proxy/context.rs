@@ -41,6 +41,15 @@ pub enum RouteKind {
     /// Panel admin WhatsApp — diperlakukan sama dengan [`RouteKind::Ppm`]:
     /// jangan disentuh header frontend-nya, dan beri timeout longgar.
     WaAdmin,
+    /// Gitea — sama seperti dua di atas: aplikasi pihak lain yang mengurus
+    /// MIME/cache/CSP-nya sendiri.
+    ///
+    /// Timeout longgar di sini BUKAN kemewahan: `git push` mengirim satu badan
+    /// permintaan yang bisa berukuran ratusan MB dan `git clone` repo besar
+    /// membuat server menghitung pack cukup lama sebelum satu byte pun terkirim.
+    /// Dengan timeout ketat, keduanya putus di tengah dan terbaca sebagai
+    /// "push gagal" tanpa sebab yang jelas.
+    Gitea,
 }
 
 impl RouteKind {
@@ -56,6 +65,7 @@ impl RouteKind {
             // lain yang mengurus MIME/cache/CSP-nya sendiri, dan dasbornya
             // lazim memakai koneksi panjang (polling status sesi WhatsApp).
             Upstream::WaAdmin => RouteKind::WaAdmin,
+            Upstream::Gitea => RouteKind::Gitea,
         }
     }
 }
@@ -100,6 +110,17 @@ impl TimeoutConfig {
             // PPM: SSE (/api/live-events) + siaran audio chunked (poll/download)
             // bersifat long-lived → read/write longgar seperti Websocket.
             RouteKind::Ppm | RouteKind::WaAdmin => Self {
+                connect_secs: 10,
+                read_secs: 3600,
+                write_secs: 3600,
+            },
+            // Gitea: `git push` mengirim satu badan permintaan yang bisa
+            // ratusan MB, dan `git clone` repo besar membuat server menghitung
+            // pack cukup lama SEBELUM satu byte pun terkirim balik. Keduanya
+            // tampak seperti koneksi menganggur bagi proxy — dengan timeout
+            // ketat mereka diputus di tengah dan terbaca sebagai "push gagal"
+            // tanpa sebab yang jelas. Samakan dengan long-lived di atas.
+            RouteKind::Gitea => Self {
                 connect_secs: 10,
                 read_secs: 3600,
                 write_secs: 3600,

@@ -121,6 +121,20 @@ pub struct Config {
     #[serde(default = "default_wa_admin_addr")]
     pub wa_admin_addr: String,
 
+    /// Gitea — host sendiri → [`Config::gitea_addr`]. OPT-IN seperti tetangganya
+    /// di atas: kosong = rulenya tak pernah cocok, jadi proxy yang tak memakainya
+    /// tak berubah perilakunya sama sekali.
+    ///
+    /// CATATAN: ini hanya mengurus Git-over-HTTPS (clone/push lewat `https://`)
+    /// dan antarmuka webnya. Git-over-SSH TIDAK lewat sini — pingora berbicara
+    /// HTTP, sedangkan SSH protokol lain di atas TCP mentah. Akses SSH memakai
+    /// port terpisah (2222) langsung ke container Gitea, di luar proxy ini.
+    #[serde(default)]
+    pub gitea_domain: String,
+
+    #[serde(default = "default_gitea_addr")]
+    pub gitea_addr: String,
+
     /// Endpoint S3 KEDUA untuk RustFS yang sama (`rustfs_s3_address`).
     /// Bukan instans baru — hanya nama host lain menuju penyimpanan yang sama,
     /// supaya aplikasi di domain PPM tak perlu menyebut ulalaapi.store.
@@ -323,6 +337,8 @@ impl Default for Config {
             image_subdomain: default_image_subdomain(),
             wa_admin_domain: String::new(),
             wa_admin_addr: default_wa_admin_addr(),
+            gitea_domain: String::new(),
+            gitea_addr: default_gitea_addr(),
             image_s3_subdomain: String::new(),
             ui_s3_subdomain: String::new(),
             ui_subdomain: default_ui_subdomain(),
@@ -370,6 +386,11 @@ fn default_rustfs_s3() -> String {
 }
 fn default_wa_admin_addr() -> String {
     "127.0.0.1:3000".into()
+}
+fn default_gitea_addr() -> String {
+    // 3300 di host → 3000 di dalam container Gitea (lihat docker-compose-nya).
+    // Bukan 3000: port itu sudah dipakai panel admin WhatsApp.
+    "127.0.0.1:3300".into()
 }
 fn default_ui_subdomain() -> String {
     "ui.ulalaapi.store".into()
