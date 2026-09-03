@@ -192,6 +192,22 @@ impl ProxyHttp for KineticProxy {
         let decision = router::route(&host_owned, &path_owned, &self.state.cfg);
         *ctx = RequestCtx::new(decision, host_owned, path_owned, method.clone(), client_ip);
 
+        // ── Batas baca SESI KLIEN ────────────────────────────────────────────
+        //
+        // `upstream_peer` di bawah cuma menyetel batas ke arah upstream. Arah
+        // sebaliknya tak pernah kita sentuh, jadi selama ini ia memakai bawaan
+        // pingora: 60 detik — termasuk untuk WebSocket, yang lalu diputus tiap
+        // kali kliennya diam semenit. Lihat catatan panjang di
+        // `TimeoutConfig::downstream_read_secs`.
+        //
+        // Dipasang DI SINI, sesudah `ctx` terisi dan sebelum apa pun dibaca
+        // dari badan permintaan. Untuk HTTP/2 pemanggilan ini tak berpengaruh
+        // (pingora menjadikannya noop) — dan itu memang tak masalah: yang
+        // bermasalah adalah WebSocket, dan WebSocket selalu HTTP/1.1.
+        session.set_read_timeout(Some(Duration::from_secs(
+            ctx.timeout.downstream_read_secs,
+        )));
+
         // Preflight CORS — handle untuk api DAN object storage.
         if method == http::Method::OPTIONS && (ctx.is_api || ctx.is_object) {
             return self.handle_preflight(session, ctx).await;
