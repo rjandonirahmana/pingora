@@ -396,18 +396,38 @@ impl ProxyHttp for KineticProxy {
         ctx: &mut Self::CTX,
         _client_reused: bool,
     ) -> Box<pingora_core::Error> {
-        tracing::warn!(
-            id      = ctx.id,
-            backend = %ctx.backend_addr,
-            uri     = ?session.req_header().uri,
-            "proxy error: {}", e,
-        );
+        // ── Level log dipisah menurut SIAPA yang gagal ───────────────────────
+        //
+        // Error DOWNSTREAM adalah klien yang pergi: tab ditutup di tengah unduhan
+        // `/pkg/e-ticketing.wasm`, navigasi saat `/api-fn/*` masih jalan
+        // ("Client closed H2, reason: stream no longer needed"), koneksi WS yang
+        // di-reset. Tak ada yang bisa atau perlu diperbaiki, dan di WARN mereka
+        // menenggelamkan satu-satunya baris yang berarti — `Upstream
+        // ReadTimedout`, yang menandakan app di belakang benar-benar tak
+        // menjawab. Karena itu downstream turun ke DEBUG (masih bisa dipanggil
+        // dengan `RUST_LOG=info,kinetic_proxy=debug` saat menyelidiki klien).
+        let upstream_yang_gagal = e.esource == ErrorSource::Upstream;
+        if upstream_yang_gagal {
+            tracing::warn!(
+                id      = ctx.id,
+                backend = %ctx.backend_addr,
+                uri     = ?session.req_header().uri,
+                "proxy error: {}", e,
+            );
+        } else {
+            tracing::debug!(
+                id      = ctx.id,
+                backend = %ctx.backend_addr,
+                uri     = ?session.req_header().uri,
+                "klien memutus: {}", e,
+            );
+        }
         // Hanya error UPSTREAM (backend benar-benar gagal) yang menghukum circuit
         // breaker. Error DOWNSTREAM (client mutus koneksi: "ConnectionClosed",
         // "H2 stream no longer needed", "Connection reset by peer") BUKAN salah
         // backend — scanner/bot yang connect lalu putus tak boleh membuka breaker
         // & merusak routing untuk user asli.
-        if e.esource == ErrorSource::Upstream {
+        if upstream_yang_gagal {
             if let Some(backend) = self.state.pool_for(ctx.upstream).find(&ctx.backend_addr) {
                 backend.breaker.record_failure();
             }
