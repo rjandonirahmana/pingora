@@ -97,6 +97,24 @@ wa_admin_addr: "127.0.0.1:3000"
 gitea_domain: "git.ulala.space"
 gitea_addr: "127.0.0.1:3300"
 
+# ── LajuBus (lajubus.online) ──────────────────────────────────────────────────
+# App Leptos SSR `bis` (tiket, jadwal, sewa & wisata bus). Semua path → :3400
+# (SSR + /api-fn + /pkg + /upload/*). www.lajubus.online ikut dilayani.
+# Container: docker -p 3400:3000 — atau jalankan binari dengan SITE_ADDR=127.0.0.1:3400.
+# Port lain sudah terpakai: 3000 panel WA, 3100 e-ticketing, 3200-3202 ppm, 3300 Gitea.
+# Kosongkan lajubus_domain untuk menonaktifkan.
+#
+# WAJIB DILAKUKAN DI LUAR KODE:
+#   1. DNS  — A record lajubus.online & www.lajubus.online → IP server ini.
+#   2. CERT — domain BERDIRI SENDIRI, jadi lineage certbot BARU (bukan --expand
+#             cert lain — itu akan mengganti isi cert domain lain):
+#               certbot certonly --standalone -d lajubus.online -d www.lajubus.online
+#             Hook pre/post yang sudah ada membebaskan :80 lalu menyalakan proxy lagi.
+#             Sebelum cert ada, proxy tetap jalan tapi lajubus.online disajikan cert
+#             web (browser menolak) — lihat warning "TLS cert lajubus" di log.
+lajubus_domain: "lajubus.online"
+lajubus_addr: "127.0.0.1:3400"
+
 # Nama host KEDUA untuk RustFS yang SAMA (rustfs_s3_address / rustfs_ui_address
 # di atas) — bukan instans baru. Gunanya supaya aplikasi di domain ppm-afm.com
 # tak perlu menyebut ulalaapi.store untuk mengambil berkasnya sendiri.
@@ -126,6 +144,11 @@ tls_key_api: "/etc/letsencrypt/live/ulalaapi.store/privkey.pem"
 # kembali container — jadi proxy ikut restart dan membaca cert baru.
 tls_cert_ppm: "/etc/letsencrypt/live/ppm-afm.com/fullchain.pem"
 tls_key_ppm: "/etc/letsencrypt/live/ppm-afm.com/privkey.pem"
+
+# Cert LajuBus (lajubus.online + www.) — lineage certbot sendiri, lihat blok
+# LajuBus di atas untuk perintah penerbitannya.
+tls_cert_lajubus: "/etc/letsencrypt/live/lajubus.online/fullchain.pem"
+tls_key_lajubus: "/etc/letsencrypt/live/lajubus.online/privkey.pem"
 
 # ── CORS (hanya berlaku untuk ulalaapi.store /api/*) ──────────────────────────
 cors_origins:

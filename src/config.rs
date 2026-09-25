@@ -81,6 +81,11 @@ pub struct Config {
     /// Cert ini harus mencakup `ppm_domain` DAN `www.{ppm_domain}`.
     pub tls_cert_ppm: Option<String>,
     pub tls_key_ppm: Option<String>,
+    /// Cert lajubus.online (+ www.) — lineage certbot sendiri.
+    #[serde(default)]
+    pub tls_cert_lajubus: Option<String>,
+    #[serde(default)]
+    pub tls_key_lajubus: Option<String>,
 
     // ── CORS ──────────────────────────────────────────────────────────────────
     #[serde(default = "default_cors_origins")]
@@ -134,6 +139,19 @@ pub struct Config {
 
     #[serde(default = "default_gitea_addr")]
     pub gitea_addr: String,
+
+    /// LajuBus (tiket & sewa bus) — domain BERDIRI SENDIRI (bukan subdomain
+    /// ulala.space) → [`Config::lajubus_addr`], semua path. OPT-IN: kosong =
+    /// rulenya tak pernah cocok. `www.` ikut dilayani.
+    ///
+    /// Karena domain sendiri, ia TAK bisa menumpang SAN cert web: certnya
+    /// wajib dipasang lewat `tls_cert_lajubus`/`tls_key_lajubus` — kalau tidak,
+    /// SNI-nya jatuh ke cert ulala.space dan browser menolak koneksi.
+    #[serde(default)]
+    pub lajubus_domain: String,
+
+    #[serde(default = "default_lajubus_addr")]
+    pub lajubus_addr: String,
 
     /// Endpoint S3 KEDUA untuk RustFS yang sama (`rustfs_s3_address`).
     /// Bukan instans baru — hanya nama host lain menuju penyimpanan yang sama,
@@ -203,6 +221,8 @@ impl Config {
         env_str!("PROXY_API_DOMAIN", cfg.api_domain);
         env_str!("PROXY_PPM_DOMAIN", cfg.ppm_domain);
         env_str!("PROXY_PPM_ADDR", cfg.ppm_addr);
+        env_str!("PROXY_LAJUBUS_DOMAIN", cfg.lajubus_domain);
+        env_str!("PROXY_LAJUBUS_ADDR", cfg.lajubus_addr);
 
         macro_rules! env_opt {
             ($var:expr, $field:expr) => {
@@ -217,6 +237,8 @@ impl Config {
         env_opt!("PROXY_TLS_KEY_API", cfg.tls_key_api);
         env_opt!("PROXY_TLS_CERT_PPM", cfg.tls_cert_ppm);
         env_opt!("PROXY_TLS_KEY_PPM", cfg.tls_key_ppm);
+        env_opt!("PROXY_TLS_CERT_LAJUBUS", cfg.tls_cert_lajubus);
+        env_opt!("PROXY_TLS_KEY_LAJUBUS", cfg.tls_key_lajubus);
 
         if let Ok(v) = std::env::var("PROXY_RATE_LIMIT_RPS") {
             cfg.rate_limit_rps = v.parse().unwrap_or(cfg.rate_limit_rps);
@@ -328,6 +350,8 @@ impl Default for Config {
             tls_key_api: None,
             tls_cert_ppm: None,
             tls_key_ppm: None,
+            tls_cert_lajubus: None,
+            tls_key_lajubus: None,
             cors_origins: default_cors_origins(),
             dev_origins: Vec::new(),
             image_cache_days: default_image_cache_days(),
@@ -339,6 +363,8 @@ impl Default for Config {
             wa_admin_addr: default_wa_admin_addr(),
             gitea_domain: String::new(),
             gitea_addr: default_gitea_addr(),
+            lajubus_domain: String::new(),
+            lajubus_addr: default_lajubus_addr(),
             image_s3_subdomain: String::new(),
             ui_s3_subdomain: String::new(),
             ui_subdomain: default_ui_subdomain(),
@@ -391,6 +417,11 @@ fn default_gitea_addr() -> String {
     // 3300 di host → 3000 di dalam container Gitea (lihat docker-compose-nya).
     // Bukan 3000: port itu sudah dipakai panel admin WhatsApp.
     "127.0.0.1:3300".into()
+}
+fn default_lajubus_addr() -> String {
+    // 3400 di host → 3000 di dalam container app `bis` (LajuBus). Port yang
+    // sudah terpakai: 3000 panel WA, 3100 e-ticketing, 3200-3202 ppm, 3300 Gitea.
+    "127.0.0.1:3400".into()
 }
 fn default_ui_subdomain() -> String {
     "ui.ulalaapi.store".into()

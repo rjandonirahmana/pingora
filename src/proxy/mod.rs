@@ -51,6 +51,7 @@ pub struct ProxyState {
     pub ppm_pool: Arc<UpstreamPool>,
     pub wa_admin_pool: Arc<UpstreamPool>,
     pub gitea_pool: Arc<UpstreamPool>,
+    pub lajubus_pool: Arc<UpstreamPool>,
     pub frontend_static: Option<Arc<StaticServe>>,
 }
 
@@ -65,6 +66,7 @@ impl ProxyState {
             Upstream::Ppm => &self.ppm_pool,
             Upstream::WaAdmin => &self.wa_admin_pool,
             Upstream::Gitea => &self.gitea_pool,
+            Upstream::Lajubus => &self.lajubus_pool,
         }
     }
 }
@@ -608,6 +610,7 @@ pub fn build_proxy_service(
         ppm_pool: Arc::new(UpstreamPool::new(cfg.ppm_upstreams())),
         wa_admin_pool: Arc::new(UpstreamPool::single(cfg.wa_admin_addr.clone())),
         gitea_pool: Arc::new(UpstreamPool::single(cfg.gitea_addr.clone())),
+        lajubus_pool: Arc::new(UpstreamPool::single(cfg.lajubus_addr.clone())),
         frontend_static: cfg
             .frontend_dist_path
             .as_ref()
@@ -754,6 +757,42 @@ pub fn build_proxy_service(
                 tracing::warn!(
                     "TLS cert ppm tidak ditemukan di {cert_ppm} / {key_ppm} — {} akan disajikan cert web (browser menolak)",
                     cfg.ppm_domain
+                );
+            }
+        }
+
+        // ── Cert LajuBus (lajubus.online) ─────────────────────────────────────
+        // Domain berdiri sendiri, sama seperti ppm-afm.com: tanpa didaftarkan
+        // di sini SNI-nya jatuh ke cert web (ulala.space) dan browser menolak
+        // koneksi dengan ERR_CERT_COMMON_NAME_INVALID.
+        if let (Some(cert_lb), Some(key_lb)) =
+            (cfg.tls_cert_lajubus.clone(), cfg.tls_key_lajubus.clone())
+        {
+            if cfg.lajubus_domain.is_empty() {
+                tracing::warn!("tls_cert_lajubus diisi tapi lajubus_domain kosong — cert diabaikan");
+            } else if std::path::Path::new(&cert_lb).exists()
+                && std::path::Path::new(&key_lb).exists()
+            {
+                use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+                let mut b = SslAcceptor::mozilla_intermediate(SslMethod::tls())
+                    .expect("LajuBus SslAcceptor");
+                b.set_certificate_chain_file(&cert_lb).expect("cert LajuBus");
+                b.set_private_key_file(&key_lb, SslFiletype::PEM)
+                    .expect("key LajuBus");
+                let exact: Vec<Box<str>> = vec![
+                    cfg.lajubus_domain.as_str().into(),
+                    format!("www.{}", cfg.lajubus_domain).into(),
+                ];
+                tracing::info!("SNI cert lajubus={cert_lb} untuk {exact:?}");
+                sni_certs.push(SniCert {
+                    exact,
+                    suffix: None,
+                    ctx: b.build().into_context(),
+                });
+            } else {
+                tracing::warn!(
+                    "TLS cert lajubus tidak ditemukan di {cert_lb} / {key_lb} — {} akan disajikan cert web (browser menolak)",
+                    cfg.lajubus_domain
                 );
             }
         }

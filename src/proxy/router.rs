@@ -14,6 +14,7 @@
 //!
 //! Rule (first-match):
 //!   0. ppm_domain / ppm_domains (± www.)    → Ppm (semua path, satu binary SSR)
+//!  0b. lajubus_domain (± www.)             → Lajubus :3400 (semua path, app `bis`)
 //!   1. web_domain + /api/ws/*               → Backend (WebSocket, same-domain WS)
 //!   2. web_domain + /api/*                  → Backend (REST, relative URL support)
 //!   3. web_domain                            → Frontend
@@ -63,6 +64,17 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
     if cocok_host(host, &cfg.gitea_domain) {
         return RouteDecision {
             upstream: Upstream::Gitea,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
+    // LajuBus — domain sendiri (+ www.), SEMUA path: satu binary Leptos SSR
+    // (SSR + /api-fn + /pkg + /upload/*). Tak pakai WebSocket → tak perlu split.
+    if is_lajubus_domain(host, cfg) {
+        return RouteDecision {
+            upstream: Upstream::Lajubus,
             strip_prefix: None,
             is_ws: false,
             is_static: false,
@@ -265,6 +277,15 @@ fn cocok_host(host: &str, nama: &str) -> bool {
     !nama.is_empty() && host == nama
 }
 
+/// `lajubus_domain` atau `www.`-nya. Kosong = tak pernah cocok (opt-in) —
+/// tanpa guard ini domain kosong + "www." bisa cocok dengan Host "www.".
+#[inline]
+fn is_lajubus_domain(host: &str, cfg: &Config) -> bool {
+    let d = cfg.lajubus_domain.as_str();
+    !d.is_empty()
+        && (host == d || (host.len() == d.len() + 4 && host.starts_with("www.") && host.ends_with(d)))
+}
+
 #[inline]
 fn is_ppm_domain(host: &str, cfg: &Config) -> bool {
     cfg.ppm_hosts().any(|d| {
@@ -302,6 +323,7 @@ pub fn is_known_host(host: &str, cfg: &Config) -> bool {
             || is_ppm_domain(host, cfg)
             || cocok_host(host, &cfg.wa_admin_domain)
             || cocok_host(host, &cfg.gitea_domain)
+            || is_lajubus_domain(host, cfg)
             || cocok_host(host, &cfg.image_s3_subdomain)
             || cocok_host(host, &cfg.ui_s3_subdomain))
 }
@@ -835,5 +857,57 @@ mod tests {
         );
         assert_eq!(d.strip_prefix, Some("/image"));
         assert!(!d.is_static);
+    }
+    fn cfg_lajubus() -> Config {
+        Config {
+            lajubus_domain: "lajubus.online".into(),
+            lajubus_addr: "127.0.0.1:3400".into(),
+            ..cfg_gitea()
+        }
+    }
+
+    /// SEMUA path lajubus.online (+ www.) ke app `bis` — SSR, server fn,
+    /// aset /pkg, dan unggah foto. Tanpa potong path, tanpa header frontend ulala.
+    #[test]
+    fn lajubus_semua_path_ke_lajubus() {
+        let c = cfg_lajubus();
+        for host in ["lajubus.online", "www.lajubus.online", "lajubus.online:443"] {
+            for p in ["/", "/sewa", "/api-fn/list_charter_buses123", "/pkg/bis.wasm", "/upload/listing-photo", "/api/x"] {
+                let d = route(host, p, &c);
+                assert_eq!(d.upstream, Upstream::Lajubus, "{host}{p}");
+                assert!(d.strip_prefix.is_none());
+                assert!(!d.is_ws && !d.is_static, "{host}{p}");
+            }
+        }
+        assert_eq!(Upstream::Lajubus.addr(&c), "127.0.0.1:3400");
+    }
+
+    /// Jebakan 421: domain baru WAJIB dikenali allowlist, kalau tidak
+    /// request_filter menolaknya sebelum route() sempat jalan.
+    #[test]
+    fn lajubus_dikenali_is_known_host() {
+        let c = cfg_lajubus();
+        assert!(is_known_host("lajubus.online", &c));
+        assert!(is_known_host("www.lajubus.online", &c));
+        assert!(!is_known_host("evil.lajubus.online", &c));
+    }
+
+    /// Opt-in: domain kosong tak menangkap apa pun — termasuk Host "www.".
+    #[test]
+    fn lajubus_kosong_tak_pernah_cocok() {
+        let c = cfg_gitea(); // lajubus_domain = "" (bawaan)
+        assert!(!is_known_host("lajubus.online", &c));
+        assert!(!is_known_host("www.", &c));
+        assert_ne!(route("lajubus.online", "/", &c).upstream, Upstream::Lajubus);
+    }
+
+    /// LajuBus tak boleh mencuri trafik domain lain, dan sebaliknya.
+    #[test]
+    fn lajubus_tak_bertabrakan_dengan_domain_lain() {
+        let c = cfg_lajubus();
+        for host in ["ulala.space", "ppm-afm.com", "git.ulala.space", "ulalaapi.store"] {
+            assert_ne!(route(host, "/", &c).upstream, Upstream::Lajubus, "{host}");
+        }
+        assert_eq!(route("git.ulala.space", "/", &c).upstream, Upstream::Gitea);
     }
 }

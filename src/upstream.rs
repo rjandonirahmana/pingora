@@ -31,6 +31,8 @@ pub enum Upstream {
     /// Gitea (:3300) — host sendiri, semua path. Hanya Git-over-HTTPS + web UI;
     /// Git-over-SSH memakai port 2222 langsung, tak lewat proxy ini.
     Gitea,
+    /// LajuBus (:3400) — app Leptos SSR `bis` di domain lajubus.online, semua path.
+    Lajubus,
 }
 
 impl Upstream {
@@ -118,6 +120,7 @@ impl Upstream {
             Upstream::Ppm => &cfg.ppm_addr,
             Upstream::WaAdmin => &cfg.wa_admin_addr,
             Upstream::Gitea => &cfg.gitea_addr,
+            Upstream::Lajubus => &cfg.lajubus_addr,
         }
     }
 }

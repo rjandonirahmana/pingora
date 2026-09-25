@@ -50,6 +50,9 @@ pub enum RouteKind {
     /// Dengan timeout ketat, keduanya putus di tengah dan terbaca sebagai
     /// "push gagal" tanpa sebab yang jelas.
     Gitea,
+    /// LajuBus (app `bis`) — Leptos SSR yang mengurus MIME/cache/CSP-nya
+    /// sendiri (leptos/nonce), jadi header frontend ulala TIDAK diterapkan.
+    Lajubus,
 }
 
 impl RouteKind {
@@ -66,6 +69,7 @@ impl RouteKind {
             // lazim memakai koneksi panjang (polling status sesi WhatsApp).
             Upstream::WaAdmin => RouteKind::WaAdmin,
             Upstream::Gitea => RouteKind::Gitea,
+            Upstream::Lajubus => RouteKind::Lajubus,
         }
     }
 }
@@ -192,6 +196,15 @@ impl TimeoutConfig {
                 read_secs: 3600,
                 write_secs: 3600,
                 downstream_read_secs: 3600,
+            },
+            // LajuBus: SSR + server fn + unggah foto (≤8 MB). Tak ada SSE/WS,
+            // jadi tak perlu 3600 dtk — 120 dtk memberi ruang unggahan di
+            // jaringan seluler lambat tanpa membuang pagar slowloris.
+            RouteKind::Lajubus => Self {
+                connect_secs: 5,
+                read_secs: 120,
+                write_secs: 120,
+                downstream_read_secs: 120,
             },
         }
     }
