@@ -368,6 +368,14 @@ fn is_subdomain_of(host: &str, parent: &str) -> bool {
         && host.as_bytes()[host.len() - parent.len() - 1] == b'.'
 }
 
+/// Domain aplikasi non-ulala yang dilayani proxy ini (kosong = nonaktif, dilewati).
+fn app_domains(cfg: &Config) -> impl Iterator<Item = &str> {
+    std::iter::once(cfg.ppm_domain.as_str())
+        .chain(cfg.ppm_domains.iter().map(String::as_str))
+        .chain(std::iter::once(cfg.lajubus_domain.as_str()))
+        .filter(|d| !d.is_empty())
+}
+
 /// True kalau Referer berasal dari domain kita (boleh akses image).
 /// `referer` = nilai header Referer (None jika tidak ada).
 pub fn referer_allowed(referer: Option<&str>, cfg: &Config) -> bool {
@@ -392,6 +400,13 @@ pub fn referer_allowed(referer: Option<&str>, cfg: &Config) -> bool {
     if is_subdomain_of(host, web) || is_subdomain_of(host, api) {
         return true;
     }
+    // Domain aplikasi LAIN yang juga dilayani proxy ini & menyimpan gambarnya
+    // di RustFS yang sama (ppm-afm.com, lajubus.online) + www./subdomainnya.
+    // Dulu hanya lolos bila kebetulan tercantum di cors_origins — lajubus.online
+    // tidak, sehingga semua <img> di halamannya kena 403.
+    if app_domains(cfg).any(|d| host == d || is_subdomain_of(host, d)) {
+        return true;
+    }
     // Origin dev / cors yang sudah di-whitelist (mis. http://localhost:3100,
     // http://77.237.242.1:3100) — supaya dev environment tidak ke-blok.
     for origin in cfg.dev_origins.iter().chain(cfg.cors_origins.iter()) {
@@ -413,7 +428,35 @@ fn now_secs() -> u64 {
 // ─── Tests: hotlink referer parsing ───────────────────────────────────────────
 #[cfg(test)]
 mod hotlink_tests {
-    use super::{is_subdomain_of, url_host};
+    use super::{is_subdomain_of, referer_allowed, url_host};
+    use crate::config::Config;
+
+    #[test]
+    fn referer_domain_aplikasi_boleh_ambil_gambar() {
+        let c = Config {
+            web_domain: "ulala.space".into(),
+            api_domain: "ulalaapi.store".into(),
+            ppm_domain: "ppm-afm.com".into(),
+            ppm_domains: vec!["ppm.ulala.space".into()],
+            lajubus_domain: "lajubus.online".into(),
+            ..Config::default()
+        };
+        for ok in [
+            "https://lajubus.online/",
+            "https://www.lajubus.online/wisata",
+            "https://ppm-afm.com/absensi",
+            "https://www.ppm-afm.com/",
+            "https://ulala.space/explore",
+        ] {
+            assert!(referer_allowed(Some(ok), &c), "{ok} harus diizinkan");
+        }
+        for bad in ["https://evil.com/", "https://lajubus.online.evil.com/", "https://notlajubus.online/"] {
+            assert!(!referer_allowed(Some(bad), &c), "{bad} harus ditolak");
+        }
+        // Domain aplikasi kosong (nonaktif) tidak membuat referer apa pun lolos.
+        let kosong = Config { lajubus_domain: String::new(), ..c };
+        assert!(!referer_allowed(Some("https://lajubus.online/"), &kosong));
+    }
 
     #[test]
     fn url_host_extraction() {
