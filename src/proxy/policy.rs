@@ -373,6 +373,7 @@ fn app_domains(cfg: &Config) -> impl Iterator<Item = &str> {
     std::iter::once(cfg.ppm_domain.as_str())
         .chain(cfg.ppm_domains.iter().map(String::as_str))
         .chain(std::iter::once(cfg.lajubus_domain.as_str()))
+        .chain(std::iter::once(cfg.ilyvowcraft_domain.as_str()))
         .filter(|d| !d.is_empty())
 }
 
@@ -439,9 +440,12 @@ mod hotlink_tests {
             ppm_domain: "ppm-afm.com".into(),
             ppm_domains: vec!["ppm.ulala.space".into()],
             lajubus_domain: "lajubus.online".into(),
+            ilyvowcraft_domain: "ilyvowcraft.online".into(),
             ..Config::default()
         };
         for ok in [
+            "https://ilyvowcraft.online/",
+            "https://www.ilyvowcraft.online/u/anindita-raditya",
             "https://lajubus.online/",
             "https://www.lajubus.online/wisata",
             "https://ppm-afm.com/absensi",

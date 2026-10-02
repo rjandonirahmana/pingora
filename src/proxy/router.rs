@@ -81,6 +81,34 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
         };
     }
 
+    // ilyvowcraft — domain sendiri (+ www.), SEMUA path: satu binary Leptos
+    // SSR `undangan` (SSR + /api + /pkg + /buat/kirim multipart + /tema.css).
+    if is_ilyvowcraft_domain(host, cfg) {
+        return RouteDecision {
+            upstream: Upstream::Ilyvowcraft,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+    // image./ui. ilyvowcraft → RustFS yang SAMA (path S3 apa adanya).
+    if cocok_host(host, &cfg.ilyvowcraft_image_host) {
+        return RouteDecision {
+            upstream: Upstream::RustFS3,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+    if cocok_host(host, &cfg.ilyvowcraft_ui_host) {
+        return RouteDecision {
+            upstream: Upstream::RustFSUI,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
     if cocok_host(host, &cfg.wa_admin_domain) {
         return RouteDecision {
             upstream: Upstream::WaAdmin,
@@ -286,6 +314,14 @@ fn is_lajubus_domain(host: &str, cfg: &Config) -> bool {
         && (host == d || (host.len() == d.len() + 4 && host.starts_with("www.") && host.ends_with(d)))
 }
 
+/// `ilyvowcraft_domain` atau `www.`-nya. Kosong = tak pernah cocok (opt-in).
+#[inline]
+fn is_ilyvowcraft_domain(host: &str, cfg: &Config) -> bool {
+    let d = cfg.ilyvowcraft_domain.as_str();
+    !d.is_empty()
+        && (host == d || (host.len() == d.len() + 4 && host.starts_with("www.") && host.ends_with(d)))
+}
+
 #[inline]
 fn is_ppm_domain(host: &str, cfg: &Config) -> bool {
     cfg.ppm_hosts().any(|d| {
@@ -324,6 +360,9 @@ pub fn is_known_host(host: &str, cfg: &Config) -> bool {
             || cocok_host(host, &cfg.wa_admin_domain)
             || cocok_host(host, &cfg.gitea_domain)
             || is_lajubus_domain(host, cfg)
+            || is_ilyvowcraft_domain(host, cfg)
+            || cocok_host(host, &cfg.ilyvowcraft_image_host)
+            || cocok_host(host, &cfg.ilyvowcraft_ui_host)
             || cocok_host(host, &cfg.image_s3_subdomain)
             || cocok_host(host, &cfg.ui_s3_subdomain))
 }
@@ -909,5 +948,64 @@ mod tests {
             assert_ne!(route(host, "/", &c).upstream, Upstream::Lajubus, "{host}");
         }
         assert_eq!(route("git.ulala.space", "/", &c).upstream, Upstream::Gitea);
+    }
+
+    fn cfg_ilyvowcraft() -> Config {
+        Config {
+            ilyvowcraft_domain: "ilyvowcraft.online".into(),
+            ilyvowcraft_addr: "127.0.0.1:3600".into(),
+            ilyvowcraft_image_host: "image.ilyvowcraft.online".into(),
+            ilyvowcraft_ui_host: "ui.ilyvowcraft.online".into(),
+            ..cfg_lajubus()
+        }
+    }
+
+    /// SEMUA path ilyvowcraft.online (+ www.) ke app `undangan` :3600 — SSR,
+    /// server fn /api/*, aset /pkg, kirim pesanan multipart, CSS tema.
+    #[test]
+    fn ilyvowcraft_semua_path_ke_undangan() {
+        let c = cfg_ilyvowcraft();
+        for host in ["ilyvowcraft.online", "www.ilyvowcraft.online", "ilyvowcraft.online:443"] {
+            for p in ["/", "/tema/jawa-klasik", "/u/anindita-raditya?pv=1", "/kelola/x/tamu.csv", "/buat/kirim", "/api/get_dashboard123", "/pkg/undangan.wasm", "/tema.css?v=1", "/ws/x"] {
+                let d = route(host, p, &c);
+                assert_eq!(d.upstream, Upstream::Ilyvowcraft, "{host}{p}");
+                assert!(d.strip_prefix.is_none());
+                assert!(!d.is_ws && !d.is_static, "{host}{p}");
+            }
+        }
+        assert_eq!(Upstream::Ilyvowcraft.addr(&c), "127.0.0.1:3600");
+    }
+
+    /// image./ui. ilyvowcraft → RustFS yang sama, path S3 tak dipotong.
+    #[test]
+    fn ilyvowcraft_image_ui_ke_rustfs() {
+        let c = cfg_ilyvowcraft();
+        let d = route("image.ilyvowcraft.online", "/undangan/foto/a/sampul.webp", &c);
+        assert_eq!(d.upstream, Upstream::RustFS3);
+        assert!(d.strip_prefix.is_none());
+        assert_eq!(route("ui.ilyvowcraft.online", "/rustfs/console/", &c).upstream, Upstream::RustFSUI);
+    }
+
+    /// Jebakan 421: keempat host wajib lolos allowlist; subdomain lain tidak.
+    #[test]
+    fn ilyvowcraft_dikenali_is_known_host() {
+        let c = cfg_ilyvowcraft();
+        for h in ["ilyvowcraft.online", "www.ilyvowcraft.online", "image.ilyvowcraft.online", "ui.ilyvowcraft.online"] {
+            assert!(is_known_host(h, &c), "{h}");
+        }
+        assert!(!is_known_host("evil.ilyvowcraft.online", &c));
+    }
+
+    /// Opt-in & tak bertabrakan: kosong = tak menangkap apa pun; domain lain tetap.
+    #[test]
+    fn ilyvowcraft_kosong_dan_tak_bertabrakan() {
+        let c = cfg_lajubus(); // ilyvowcraft_* kosong (bawaan)
+        assert!(!is_known_host("ilyvowcraft.online", &c));
+        assert!(!is_known_host("www.", &c));
+        let c = cfg_ilyvowcraft();
+        for host in ["ulala.space", "lajubus.online", "ppm-afm.com", "git.ulala.space", "ulalaapi.store"] {
+            assert_ne!(route(host, "/", &c).upstream, Upstream::Ilyvowcraft, "{host}");
+        }
+        assert_eq!(route("lajubus.online", "/", &c).upstream, Upstream::Lajubus);
     }
 }

@@ -33,6 +33,9 @@ pub enum Upstream {
     Gitea,
     /// LajuBus (:3400) — app Leptos SSR `bis` di domain lajubus.online, semua path.
     Lajubus,
+    /// ilyvowcraft (:3600) — app Leptos SSR `undangan` (undangan nikah digital)
+    /// di domain ilyvowcraft.online, semua path.
+    Ilyvowcraft,
 }
 
 impl Upstream {
@@ -121,6 +124,7 @@ impl Upstream {
             Upstream::WaAdmin => &cfg.wa_admin_addr,
             Upstream::Gitea => &cfg.gitea_addr,
             Upstream::Lajubus => &cfg.lajubus_addr,
+            Upstream::Ilyvowcraft => &cfg.ilyvowcraft_addr,
         }
     }
 }

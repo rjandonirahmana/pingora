@@ -52,6 +52,7 @@ pub struct ProxyState {
     pub wa_admin_pool: Arc<UpstreamPool>,
     pub gitea_pool: Arc<UpstreamPool>,
     pub lajubus_pool: Arc<UpstreamPool>,
+    pub ilyvowcraft_pool: Arc<UpstreamPool>,
     pub frontend_static: Option<Arc<StaticServe>>,
 }
 
@@ -67,6 +68,7 @@ impl ProxyState {
             Upstream::WaAdmin => &self.wa_admin_pool,
             Upstream::Gitea => &self.gitea_pool,
             Upstream::Lajubus => &self.lajubus_pool,
+            Upstream::Ilyvowcraft => &self.ilyvowcraft_pool,
         }
     }
 }
@@ -611,6 +613,7 @@ pub fn build_proxy_service(
         wa_admin_pool: Arc::new(UpstreamPool::single(cfg.wa_admin_addr.clone())),
         gitea_pool: Arc::new(UpstreamPool::single(cfg.gitea_addr.clone())),
         lajubus_pool: Arc::new(UpstreamPool::single(cfg.lajubus_addr.clone())),
+        ilyvowcraft_pool: Arc::new(UpstreamPool::single(cfg.ilyvowcraft_addr.clone())),
         frontend_static: cfg
             .frontend_dist_path
             .as_ref()
@@ -793,6 +796,51 @@ pub fn build_proxy_service(
                 tracing::warn!(
                     "TLS cert lajubus tidak ditemukan di {cert_lb} / {key_lb} — {} akan disajikan cert web (browser menolak)",
                     cfg.lajubus_domain
+                );
+            }
+        }
+
+        // ── Cert ilyvowcraft (ilyvowcraft.online) ─────────────────────────────
+        // Domain berdiri sendiri seperti lajubus.online. Satu lineage certbot
+        // mencakup domain, www., dan host image./ui. (RustFS) — diterbitkan:
+        //   certbot certonly --standalone -d ilyvowcraft.online \
+        //     -d www.ilyvowcraft.online -d image.ilyvowcraft.online -d ui.ilyvowcraft.online
+        if let (Some(cert_iv), Some(key_iv)) =
+            (cfg.tls_cert_ilyvowcraft.clone(), cfg.tls_key_ilyvowcraft.clone())
+        {
+            if cfg.ilyvowcraft_domain.is_empty() {
+                tracing::warn!("tls_cert_ilyvowcraft diisi tapi ilyvowcraft_domain kosong — cert diabaikan");
+            } else if std::path::Path::new(&cert_iv).exists()
+                && std::path::Path::new(&key_iv).exists()
+            {
+                use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+                let mut b = SslAcceptor::mozilla_intermediate(SslMethod::tls())
+                    .expect("ilyvowcraft SslAcceptor");
+                b.set_certificate_chain_file(&cert_iv).expect("cert ilyvowcraft");
+                b.set_private_key_file(&key_iv, SslFiletype::PEM)
+                    .expect("key ilyvowcraft");
+                let mut exact: Vec<Box<str>> = vec![
+                    cfg.ilyvowcraft_domain.as_str().into(),
+                    format!("www.{}", cfg.ilyvowcraft_domain).into(),
+                ];
+                for tambahan in [&cfg.ilyvowcraft_image_host, &cfg.ilyvowcraft_ui_host] {
+                    // Hanya subdomain ilyvowcraft_domain — host lain tak tercakup cert ini.
+                    if !tambahan.is_empty()
+                        && tambahan.ends_with(&format!(".{}", cfg.ilyvowcraft_domain))
+                    {
+                        exact.push(tambahan.as_str().into());
+                    }
+                }
+                tracing::info!("SNI cert ilyvowcraft={cert_iv} untuk {exact:?}");
+                sni_certs.push(SniCert {
+                    exact,
+                    suffix: None,
+                    ctx: b.build().into_context(),
+                });
+            } else {
+                tracing::warn!(
+                    "TLS cert ilyvowcraft tidak ditemukan di {cert_iv} / {key_iv} — {} akan disajikan cert web (browser menolak)",
+                    cfg.ilyvowcraft_domain
                 );
             }
         }

@@ -53,6 +53,9 @@ pub enum RouteKind {
     /// LajuBus (app `bis`) — Leptos SSR yang mengurus MIME/cache/CSP-nya
     /// sendiri (leptos/nonce), jadi header frontend ulala TIDAK diterapkan.
     Lajubus,
+    /// ilyvowcraft (app `undangan`) — Leptos SSR yang mengurus cache/CSP-nya
+    /// sendiri (CSP ber-nonce per request), header frontend ulala TIDAK diterapkan.
+    Ilyvowcraft,
 }
 
 impl RouteKind {
@@ -70,6 +73,7 @@ impl RouteKind {
             Upstream::WaAdmin => RouteKind::WaAdmin,
             Upstream::Gitea => RouteKind::Gitea,
             Upstream::Lajubus => RouteKind::Lajubus,
+            Upstream::Ilyvowcraft => RouteKind::Ilyvowcraft,
         }
     }
 }
@@ -205,6 +209,15 @@ impl TimeoutConfig {
                 read_secs: 120,
                 write_secs: 120,
                 downstream_read_secs: 120,
+            },
+            // ilyvowcraft: pesanan /buat/kirim = multipart hingga ±41 MB (8 foto
+            // + lagu) dari HP. App sendiri memberi TimeoutLayer 120 dtk (408);
+            // proxy diberi sedikit lebih longgar agar app yang menjawab duluan.
+            RouteKind::Ilyvowcraft => Self {
+                connect_secs: 5,
+                read_secs: 150,
+                write_secs: 150,
+                downstream_read_secs: 150,
             },
         }
     }

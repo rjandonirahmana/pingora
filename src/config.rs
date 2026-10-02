@@ -86,6 +86,11 @@ pub struct Config {
     pub tls_cert_lajubus: Option<String>,
     #[serde(default)]
     pub tls_key_lajubus: Option<String>,
+    /// Cert ilyvowcraft.online (+ www., image., ui.) — lineage certbot sendiri.
+    #[serde(default)]
+    pub tls_cert_ilyvowcraft: Option<String>,
+    #[serde(default)]
+    pub tls_key_ilyvowcraft: Option<String>,
 
     // ── CORS ──────────────────────────────────────────────────────────────────
     #[serde(default = "default_cors_origins")]
@@ -152,6 +157,25 @@ pub struct Config {
 
     #[serde(default = "default_lajubus_addr")]
     pub lajubus_addr: String,
+
+    /// ilyvowcraft (undangan nikah digital, app `undangan`) — domain BERDIRI
+    /// SENDIRI → [`Config::ilyvowcraft_addr`], semua path. OPT-IN: kosong = tak
+    /// pernah cocok. `www.` ikut dilayani. Certnya wajib lewat
+    /// `tls_cert_ilyvowcraft` (alasan sama dengan LajuBus).
+    #[serde(default)]
+    pub ilyvowcraft_domain: String,
+
+    #[serde(default = "default_ilyvowcraft_addr")]
+    pub ilyvowcraft_addr: String,
+
+    /// Host S3 & console RustFS ATAS NAMA ilyvowcraft (mis.
+    /// image.ilyvowcraft.online / ui.ilyvowcraft.online) → `rustfs_s3_address`
+    /// / `rustfs_ui_address` yang SAMA — bukan instans baru. Host PENUH; kosong
+    /// = nonaktif. Ikut disajikan cert ilyvowcraft bila subdomainnya.
+    #[serde(default)]
+    pub ilyvowcraft_image_host: String,
+    #[serde(default)]
+    pub ilyvowcraft_ui_host: String,
 
     /// Endpoint S3 KEDUA untuk RustFS yang sama (`rustfs_s3_address`).
     /// Bukan instans baru — hanya nama host lain menuju penyimpanan yang sama,
@@ -223,6 +247,8 @@ impl Config {
         env_str!("PROXY_PPM_ADDR", cfg.ppm_addr);
         env_str!("PROXY_LAJUBUS_DOMAIN", cfg.lajubus_domain);
         env_str!("PROXY_LAJUBUS_ADDR", cfg.lajubus_addr);
+        env_str!("PROXY_ILYVOWCRAFT_DOMAIN", cfg.ilyvowcraft_domain);
+        env_str!("PROXY_ILYVOWCRAFT_ADDR", cfg.ilyvowcraft_addr);
 
         macro_rules! env_opt {
             ($var:expr, $field:expr) => {
@@ -239,6 +265,8 @@ impl Config {
         env_opt!("PROXY_TLS_KEY_PPM", cfg.tls_key_ppm);
         env_opt!("PROXY_TLS_CERT_LAJUBUS", cfg.tls_cert_lajubus);
         env_opt!("PROXY_TLS_KEY_LAJUBUS", cfg.tls_key_lajubus);
+        env_opt!("PROXY_TLS_CERT_ILYVOWCRAFT", cfg.tls_cert_ilyvowcraft);
+        env_opt!("PROXY_TLS_KEY_ILYVOWCRAFT", cfg.tls_key_ilyvowcraft);
 
         if let Ok(v) = std::env::var("PROXY_RATE_LIMIT_RPS") {
             cfg.rate_limit_rps = v.parse().unwrap_or(cfg.rate_limit_rps);
@@ -352,6 +380,8 @@ impl Default for Config {
             tls_key_ppm: None,
             tls_cert_lajubus: None,
             tls_key_lajubus: None,
+            tls_cert_ilyvowcraft: None,
+            tls_key_ilyvowcraft: None,
             cors_origins: default_cors_origins(),
             dev_origins: Vec::new(),
             image_cache_days: default_image_cache_days(),
@@ -365,6 +395,10 @@ impl Default for Config {
             gitea_addr: default_gitea_addr(),
             lajubus_domain: String::new(),
             lajubus_addr: default_lajubus_addr(),
+            ilyvowcraft_domain: String::new(),
+            ilyvowcraft_addr: default_ilyvowcraft_addr(),
+            ilyvowcraft_image_host: String::new(),
+            ilyvowcraft_ui_host: String::new(),
             image_s3_subdomain: String::new(),
             ui_s3_subdomain: String::new(),
             ui_subdomain: default_ui_subdomain(),
@@ -423,9 +457,31 @@ fn default_lajubus_addr() -> String {
     // sudah terpakai: 3000 panel WA, 3100 e-ticketing, 3200-3202 ppm, 3300 Gitea.
     "127.0.0.1:3400".into()
 }
+fn default_ilyvowcraft_addr() -> String {
+    // 3600 di host → 3000 di dalam container app `undangan` (ilyvowcraft).
+    "127.0.0.1:3600".into()
+}
 fn default_ui_subdomain() -> String {
     "ui.ulalaapi.store".into()
 }
 fn default_image_subdomain() -> String {
     "image.ulalaapi.store".into()
+}
+
+#[cfg(test)]
+mod config_yaml_tests {
+    use super::Config;
+
+    /// config.yaml repo HARUS bisa diparse — kalau tidak proxy FATAL saat start
+    /// dan SEMUA domain mati. Sekalian mengunci entri ilyvowcraft.
+    #[test]
+    fn config_yaml_repo_valid() {
+        let cfg: Config = serde_yaml::from_str(include_str!("../config.yaml")).expect("config.yaml tidak valid");
+        assert_eq!(cfg.ilyvowcraft_domain, "ilyvowcraft.online");
+        assert_eq!(cfg.ilyvowcraft_addr, "127.0.0.1:3600");
+        assert_eq!(cfg.ilyvowcraft_image_host, "image.ilyvowcraft.online");
+        assert_eq!(cfg.ilyvowcraft_ui_host, "ui.ilyvowcraft.online");
+        assert_eq!(cfg.tls_cert_ilyvowcraft.as_deref(), Some("/etc/letsencrypt/live/ilyvowcraft.online/fullchain.pem"));
+        assert_eq!(cfg.lajubus_domain, "lajubus.online");
+    }
 }

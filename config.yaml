@@ -115,6 +115,19 @@ gitea_addr: "127.0.0.1:3300"
 lajubus_domain: "lajubus.online"
 lajubus_addr: "127.0.0.1:3400"
 
+# ── ilyvowcraft (ilyvowcraft.online) ──────────────────────────────────────────
+# App Leptos SSR `undangan` (undangan nikah digital). Semua path → :3600
+# (SSR + /api/* server fn + /pkg + /buat/kirim multipart). www. ikut dilayani.
+# Container: docker -p 127.0.0.1:3600:3000. Kosongkan untuk menonaktifkan.
+# image./ui. = nama host KEDUA ke RustFS yang SAMA (:9000 / :9001), path apa adanya.
+# Cert: lineage sendiri (diterbitkan 2 Okt 2026, kedaluwarsa 31 Des 2026):
+#   certbot certonly --standalone -d ilyvowcraft.online -d www.ilyvowcraft.online \
+#     -d image.ilyvowcraft.online -d ui.ilyvowcraft.online
+ilyvowcraft_domain: "ilyvowcraft.online"
+ilyvowcraft_addr: "127.0.0.1:3600"
+ilyvowcraft_image_host: "image.ilyvowcraft.online" # → :9000 (S3 API)
+ilyvowcraft_ui_host: "ui.ilyvowcraft.online" # → :9001 (console)
+
 # Nama host KEDUA untuk RustFS yang SAMA (rustfs_s3_address / rustfs_ui_address
 # di atas) — bukan instans baru. Gunanya supaya aplikasi di domain ppm-afm.com
 # tak perlu menyebut ulalaapi.store untuk mengambil berkasnya sendiri.
@@ -150,6 +163,10 @@ tls_key_ppm: "/etc/letsencrypt/live/ppm-afm.com/privkey.pem"
 tls_cert_lajubus: "/etc/letsencrypt/live/lajubus.online/fullchain.pem"
 tls_key_lajubus: "/etc/letsencrypt/live/lajubus.online/privkey.pem"
 
+# Cert ilyvowcraft (domain + www. + image. + ui.) — lihat blok ilyvowcraft di atas.
+tls_cert_ilyvowcraft: "/etc/letsencrypt/live/ilyvowcraft.online/fullchain.pem"
+tls_key_ilyvowcraft: "/etc/letsencrypt/live/ilyvowcraft.online/privkey.pem"
+
 # ── CORS (hanya berlaku untuk ulalaapi.store /api/*) ──────────────────────────
 cors_origins:
   - "https://ulala.space"
@@ -157,6 +174,7 @@ cors_origins:
   - "https://image.ulalaapi.store"
   - "https://ui.ulalaapi.store"
   - "https://ppm-afm.com"
+  - "https://ilyvowcraft.online"
 
 # ── Image cache ───────────────────────────────────────────────────────────────
 image_cache_days: 30
@@ -178,4 +196,5 @@ dev_origins:
   - "http://localhost:4000"
   - "https://ulala.space"
   - "https://ppm-afm.com"
+  - "https://ilyvowcraft.online"
   # - "http://127.0.0.1:3000"  # uncomment jika pakai 127.0.0.1 bukan localhost
