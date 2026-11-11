@@ -253,10 +253,15 @@ pub fn apply_response(
             "max-age=31536000; includeSubDomains",
         )?;
     }
-    upstream_resp.insert_header(
-        "permissions-policy",
-        "geolocation=(), microphone=(), camera=()",
-    )?;
+    // Bawaan ketat HANYA bila aplikasi tak mengirim sendiri: aplikasi yang
+    // butuh kamera (scan QR) / mikrofon (rekam pesan suara) menyetel
+    // `camera=(self)` / `microphone=(self)` — dulu selalu ditimpa jadi ().
+    if upstream_resp.headers.get("permissions-policy").is_none() {
+        upstream_resp.insert_header(
+            "permissions-policy",
+            "geolocation=(), microphone=(), camera=()",
+        )?;
+    }
 
     // Content-Security-Policy untuk frontend Leptos WASM.
     //
@@ -462,7 +467,7 @@ fn apply_cache(
         }
         // PPM kelola Cache-Control sendiri (immutable /pkg ber-hash, no-cache HTML)
         // — proxy JANGAN menimpa.
-        RouteKind::Ppm | RouteKind::WaAdmin | RouteKind::Gitea | RouteKind::Lajubus | RouteKind::Ilyvowcraft => {}
+        RouteKind::Ppm | RouteKind::WaAdmin | RouteKind::Gitea | RouteKind::Lajubus | RouteKind::Ilyvowcraft | RouteKind::Tokodialogue => {}
     }
     Ok(())
 }

@@ -36,6 +36,9 @@ pub enum Upstream {
     /// ilyvowcraft (:3600) — app Leptos SSR `undangan` (undangan nikah digital)
     /// di domain ilyvowcraft.online, semua path.
     Ilyvowcraft,
+    /// TokoDialogue (:3800) — app Leptos SSR `bekasbagus` (marketplace bekas)
+    /// di domain tokodialogue.com, semua path.
+    Tokodialogue,
 }
 
 impl Upstream {
@@ -125,6 +128,7 @@ impl Upstream {
             Upstream::Gitea => &cfg.gitea_addr,
             Upstream::Lajubus => &cfg.lajubus_addr,
             Upstream::Ilyvowcraft => &cfg.ilyvowcraft_addr,
+            Upstream::Tokodialogue => &cfg.tokodialogue_addr,
         }
     }
 }

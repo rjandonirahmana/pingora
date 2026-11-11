@@ -56,6 +56,9 @@ pub enum RouteKind {
     /// ilyvowcraft (app `undangan`) — Leptos SSR yang mengurus cache/CSP-nya
     /// sendiri (CSP ber-nonce per request), header frontend ulala TIDAK diterapkan.
     Ilyvowcraft,
+    /// TokoDialogue (app `bekasbagus`) — Leptos SSR yang mengurus cache/CSP-nya
+    /// sendiri; header frontend ulala TIDAK diterapkan. Punya SSE (/events).
+    Tokodialogue,
 }
 
 impl RouteKind {
@@ -74,6 +77,7 @@ impl RouteKind {
             Upstream::Gitea => RouteKind::Gitea,
             Upstream::Lajubus => RouteKind::Lajubus,
             Upstream::Ilyvowcraft => RouteKind::Ilyvowcraft,
+            Upstream::Tokodialogue => RouteKind::Tokodialogue,
         }
     }
 }
@@ -218,6 +222,16 @@ impl TimeoutConfig {
                 read_secs: 150,
                 write_secs: 150,
                 downstream_read_secs: 150,
+            },
+            // TokoDialogue: SSE notifikasi chat (keep-alive app tiap 25 dtk)
+            // dibuka sepanjang tab hidup → downstream 3600 dtk seperti PPM.
+            // Upstream read 120 dtk cukup karena SSE tak pernah diam > 25 dtk;
+            // unggah foto ≤ batas app dari HP lambat dapat 120 dtk.
+            RouteKind::Tokodialogue => Self {
+                connect_secs: 5,
+                read_secs: 120,
+                write_secs: 120,
+                downstream_read_secs: 3600,
             },
         }
     }

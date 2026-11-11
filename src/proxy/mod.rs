@@ -53,6 +53,7 @@ pub struct ProxyState {
     pub gitea_pool: Arc<UpstreamPool>,
     pub lajubus_pool: Arc<UpstreamPool>,
     pub ilyvowcraft_pool: Arc<UpstreamPool>,
+    pub tokodialogue_pool: Arc<UpstreamPool>,
     pub frontend_static: Option<Arc<StaticServe>>,
 }
 
@@ -69,6 +70,7 @@ impl ProxyState {
             Upstream::Gitea => &self.gitea_pool,
             Upstream::Lajubus => &self.lajubus_pool,
             Upstream::Ilyvowcraft => &self.ilyvowcraft_pool,
+            Upstream::Tokodialogue => &self.tokodialogue_pool,
         }
     }
 }
@@ -614,6 +616,7 @@ pub fn build_proxy_service(
         gitea_pool: Arc::new(UpstreamPool::single(cfg.gitea_addr.clone())),
         lajubus_pool: Arc::new(UpstreamPool::single(cfg.lajubus_addr.clone())),
         ilyvowcraft_pool: Arc::new(UpstreamPool::single(cfg.ilyvowcraft_addr.clone())),
+        tokodialogue_pool: Arc::new(UpstreamPool::single(cfg.tokodialogue_addr.clone())),
         frontend_static: cfg
             .frontend_dist_path
             .as_ref()
@@ -841,6 +844,48 @@ pub fn build_proxy_service(
                 tracing::warn!(
                     "TLS cert ilyvowcraft tidak ditemukan di {cert_iv} / {key_iv} — {} akan disajikan cert web (browser menolak)",
                     cfg.ilyvowcraft_domain
+                );
+            }
+        }
+
+        // ── Cert TokoDialogue (tokodialogue.com) ──────────────────────────────
+        // Domain berdiri sendiri. Satu lineage certbot mencakup domain, www.,
+        // dan image. (RustFS):
+        //   certbot certonly --standalone -d tokodialogue.com \
+        //     -d www.tokodialogue.com -d image.tokodialogue.com
+        if let (Some(cert_td), Some(key_td)) =
+            (cfg.tls_cert_tokodialogue.clone(), cfg.tls_key_tokodialogue.clone())
+        {
+            if cfg.tokodialogue_domain.is_empty() {
+                tracing::warn!("tls_cert_tokodialogue diisi tapi tokodialogue_domain kosong — cert diabaikan");
+            } else if std::path::Path::new(&cert_td).exists()
+                && std::path::Path::new(&key_td).exists()
+            {
+                use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+                let mut b = SslAcceptor::mozilla_intermediate(SslMethod::tls())
+                    .expect("tokodialogue SslAcceptor");
+                b.set_certificate_chain_file(&cert_td).expect("cert tokodialogue");
+                b.set_private_key_file(&key_td, SslFiletype::PEM)
+                    .expect("key tokodialogue");
+                let mut exact: Vec<Box<str>> = vec![
+                    cfg.tokodialogue_domain.as_str().into(),
+                    format!("www.{}", cfg.tokodialogue_domain).into(),
+                ];
+                let img = &cfg.tokodialogue_image_host;
+                // Hanya subdomain tokodialogue_domain — host lain tak tercakup cert ini.
+                if !img.is_empty() && img.ends_with(&format!(".{}", cfg.tokodialogue_domain)) {
+                    exact.push(img.as_str().into());
+                }
+                tracing::info!("SNI cert tokodialogue={cert_td} untuk {exact:?}");
+                sni_certs.push(SniCert {
+                    exact,
+                    suffix: None,
+                    ctx: b.build().into_context(),
+                });
+            } else {
+                tracing::warn!(
+                    "TLS cert tokodialogue tidak ditemukan di {cert_td} / {key_td} — {} akan disajikan cert web (browser menolak)",
+                    cfg.tokodialogue_domain
                 );
             }
         }

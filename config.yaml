@@ -128,6 +128,19 @@ ilyvowcraft_addr: "127.0.0.1:3600"
 ilyvowcraft_image_host: "image.ilyvowcraft.online" # → :9000 (S3 API)
 ilyvowcraft_ui_host: "ui.ilyvowcraft.online" # → :9001 (console)
 
+# ── TokoDialogue (tokodialogue.com) ───────────────────────────────────────────
+# App Leptos SSR `bekasbagus` (marketplace bekas C2C). Semua path → :3800
+# (SSR + /api server fn + /pkg + /media + /foto + SSE /events). www. ikut.
+# Container: docker -p 127.0.0.1:3800:3800. Kosongkan untuk menonaktifkan.
+# image. = nama host KEDUA ke RustFS yang SAMA (:9000), path apa adanya
+# (https://image.tokodialogue.com/bekasbagus/{yyyymm}/{uuid}.avif).
+# Cert: lineage sendiri —
+#   certbot certonly --standalone -d tokodialogue.com -d www.tokodialogue.com \
+#     -d image.tokodialogue.com
+tokodialogue_domain: "tokodialogue.com"
+tokodialogue_addr: "127.0.0.1:3800"
+tokodialogue_image_host: "image.tokodialogue.com" # → :9000 (S3 API)
+
 # Nama host KEDUA untuk RustFS yang SAMA (rustfs_s3_address / rustfs_ui_address
 # di atas) — bukan instans baru. Gunanya supaya aplikasi di domain ppm-afm.com
 # tak perlu menyebut ulalaapi.store untuk mengambil berkasnya sendiri.
@@ -167,6 +180,10 @@ tls_key_lajubus: "/etc/letsencrypt/live/lajubus.online/privkey.pem"
 tls_cert_ilyvowcraft: "/etc/letsencrypt/live/ilyvowcraft.online/fullchain.pem"
 tls_key_ilyvowcraft: "/etc/letsencrypt/live/ilyvowcraft.online/privkey.pem"
 
+# Cert TokoDialogue (domain + www. + image.) — lihat blok TokoDialogue di atas.
+tls_cert_tokodialogue: "/etc/letsencrypt/live/tokodialogue.com/fullchain.pem"
+tls_key_tokodialogue: "/etc/letsencrypt/live/tokodialogue.com/privkey.pem"
+
 # ── CORS (hanya berlaku untuk ulalaapi.store /api/*) ──────────────────────────
 cors_origins:
   - "https://ulala.space"
@@ -194,6 +211,10 @@ dev_origins:
   - "http://77.237.242.1:3100"
   - "http://localhost:5173"
   - "http://localhost:4000"
+  # undanganILY dev (cargo leptos watch) — ornamen mask dari RustFS butuh CORS
+  # setelah public/img & public/video dihapus dari repo (aset di RustFS).
+  - "http://localhost:3600"
+  - "http://127.0.0.1:3600"
   - "https://ulala.space"
   - "https://ppm-afm.com"
   - "https://ilyvowcraft.online"

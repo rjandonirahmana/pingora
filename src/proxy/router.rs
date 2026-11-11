@@ -109,6 +109,27 @@ pub fn route(host: &str, path: &str, cfg: &Config) -> RouteDecision {
         };
     }
 
+    // TokoDialogue — domain sendiri (+ www.), SEMUA path: satu binary Leptos
+    // SSR `bekasbagus` (SSR + /api + /pkg + /media + /foto + SSE /events).
+    if is_tokodialogue_domain(host, cfg) {
+        return RouteDecision {
+            upstream: Upstream::Tokodialogue,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+    // image.tokodialogue.com → RustFS yang SAMA (path S3 apa adanya:
+    // /{bucket}/{yyyymm}/{uuid}.avif).
+    if cocok_host(host, &cfg.tokodialogue_image_host) {
+        return RouteDecision {
+            upstream: Upstream::RustFS3,
+            strip_prefix: None,
+            is_ws: false,
+            is_static: false,
+        };
+    }
+
     if cocok_host(host, &cfg.wa_admin_domain) {
         return RouteDecision {
             upstream: Upstream::WaAdmin,
@@ -322,6 +343,14 @@ fn is_ilyvowcraft_domain(host: &str, cfg: &Config) -> bool {
         && (host == d || (host.len() == d.len() + 4 && host.starts_with("www.") && host.ends_with(d)))
 }
 
+/// `tokodialogue_domain` atau `www.`-nya. Kosong = tak pernah cocok (opt-in).
+#[inline]
+fn is_tokodialogue_domain(host: &str, cfg: &Config) -> bool {
+    let d = cfg.tokodialogue_domain.as_str();
+    !d.is_empty()
+        && (host == d || (host.len() == d.len() + 4 && host.starts_with("www.") && host.ends_with(d)))
+}
+
 #[inline]
 fn is_ppm_domain(host: &str, cfg: &Config) -> bool {
     cfg.ppm_hosts().any(|d| {
@@ -363,6 +392,8 @@ pub fn is_known_host(host: &str, cfg: &Config) -> bool {
             || is_ilyvowcraft_domain(host, cfg)
             || cocok_host(host, &cfg.ilyvowcraft_image_host)
             || cocok_host(host, &cfg.ilyvowcraft_ui_host)
+            || is_tokodialogue_domain(host, cfg)
+            || cocok_host(host, &cfg.tokodialogue_image_host)
             || cocok_host(host, &cfg.image_s3_subdomain)
             || cocok_host(host, &cfg.ui_s3_subdomain))
 }
@@ -1007,5 +1038,50 @@ mod tests {
             assert_ne!(route(host, "/", &c).upstream, Upstream::Ilyvowcraft, "{host}");
         }
         assert_eq!(route("lajubus.online", "/", &c).upstream, Upstream::Lajubus);
+    }
+
+    fn cfg_tokodialogue() -> Config {
+        Config {
+            tokodialogue_domain: "tokodialogue.com".into(),
+            tokodialogue_addr: "127.0.0.1:3800".into(),
+            tokodialogue_image_host: "image.tokodialogue.com".into(),
+            ..cfg_ilyvowcraft()
+        }
+    }
+
+    /// SEMUA path tokodialogue.com (+ www.) ke app `bekasbagus` :3800; image.
+    /// ke RustFS dengan path S3 utuh (bucket tetap di depan).
+    #[test]
+    fn tokodialogue_semua_path_dan_image() {
+        let c = cfg_tokodialogue();
+        for host in ["tokodialogue.com", "www.tokodialogue.com", "tokodialogue.com:443"] {
+            for p in ["/", "/barang/x", "/feed", "/events", "/foto/202611/a.avif", "/media/202611/a.avif", "/pkg/bekasbagus.wasm", "/api/x"] {
+                let d = route(host, p, &c);
+                assert_eq!(d.upstream, Upstream::Tokodialogue, "{host}{p}");
+                assert!(d.strip_prefix.is_none() && !d.is_ws && !d.is_static, "{host}{p}");
+            }
+        }
+        assert_eq!(Upstream::Tokodialogue.addr(&c), "127.0.0.1:3800");
+        let d = route("image.tokodialogue.com", "/bekasbagus/202611/a.avif", &c);
+        assert_eq!(d.upstream, Upstream::RustFS3);
+        assert!(d.strip_prefix.is_none());
+    }
+
+    /// Jebakan 421 + opt-in: ketiga host lolos allowlist, subdomain lain tidak,
+    /// dan config kosong tak menangkap apa pun.
+    #[test]
+    fn tokodialogue_allowlist_dan_opt_in() {
+        let c = cfg_tokodialogue();
+        for h in ["tokodialogue.com", "www.tokodialogue.com", "image.tokodialogue.com"] {
+            assert!(is_known_host(h, &c), "{h}");
+        }
+        assert!(!is_known_host("ui.tokodialogue.com", &c));
+        assert!(!is_known_host("evil.tokodialogue.com", &c));
+        for host in ["ilyvowcraft.online", "lajubus.online", "image.ilyvowcraft.online", "ulala.space"] {
+            assert_ne!(route(host, "/", &c).upstream, Upstream::Tokodialogue, "{host}");
+        }
+        let kosong = cfg_ilyvowcraft();
+        assert!(!is_known_host("tokodialogue.com", &kosong));
+        assert!(!is_known_host("image.tokodialogue.com", &kosong));
     }
 }

@@ -91,6 +91,11 @@ pub struct Config {
     pub tls_cert_ilyvowcraft: Option<String>,
     #[serde(default)]
     pub tls_key_ilyvowcraft: Option<String>,
+    /// Cert tokodialogue.com (+ www., image.) — lineage certbot sendiri.
+    #[serde(default)]
+    pub tls_cert_tokodialogue: Option<String>,
+    #[serde(default)]
+    pub tls_key_tokodialogue: Option<String>,
 
     // ── CORS ──────────────────────────────────────────────────────────────────
     #[serde(default = "default_cors_origins")]
@@ -177,6 +182,21 @@ pub struct Config {
     #[serde(default)]
     pub ilyvowcraft_ui_host: String,
 
+    /// TokoDialogue (marketplace bekas C2C, app `bekasbagus`) — domain BERDIRI
+    /// SENDIRI → [`Config::tokodialogue_addr`], semua path (SSR + server fn +
+    /// /pkg + unggah foto + SSE /events). OPT-IN: kosong = tak pernah cocok.
+    /// `www.` ikut dilayani. Cert wajib lewat `tls_cert_tokodialogue`.
+    #[serde(default)]
+    pub tokodialogue_domain: String,
+
+    #[serde(default = "default_tokodialogue_addr")]
+    pub tokodialogue_addr: String,
+
+    /// Host S3 RustFS ATAS NAMA TokoDialogue (mis. image.tokodialogue.com) →
+    /// `rustfs_s3_address` yang SAMA, path S3 apa adanya. Kosong = nonaktif.
+    #[serde(default)]
+    pub tokodialogue_image_host: String,
+
     /// Endpoint S3 KEDUA untuk RustFS yang sama (`rustfs_s3_address`).
     /// Bukan instans baru — hanya nama host lain menuju penyimpanan yang sama,
     /// supaya aplikasi di domain PPM tak perlu menyebut ulalaapi.store.
@@ -249,6 +269,8 @@ impl Config {
         env_str!("PROXY_LAJUBUS_ADDR", cfg.lajubus_addr);
         env_str!("PROXY_ILYVOWCRAFT_DOMAIN", cfg.ilyvowcraft_domain);
         env_str!("PROXY_ILYVOWCRAFT_ADDR", cfg.ilyvowcraft_addr);
+        env_str!("PROXY_TOKODIALOGUE_DOMAIN", cfg.tokodialogue_domain);
+        env_str!("PROXY_TOKODIALOGUE_ADDR", cfg.tokodialogue_addr);
 
         macro_rules! env_opt {
             ($var:expr, $field:expr) => {
@@ -267,6 +289,8 @@ impl Config {
         env_opt!("PROXY_TLS_KEY_LAJUBUS", cfg.tls_key_lajubus);
         env_opt!("PROXY_TLS_CERT_ILYVOWCRAFT", cfg.tls_cert_ilyvowcraft);
         env_opt!("PROXY_TLS_KEY_ILYVOWCRAFT", cfg.tls_key_ilyvowcraft);
+        env_opt!("PROXY_TLS_CERT_TOKODIALOGUE", cfg.tls_cert_tokodialogue);
+        env_opt!("PROXY_TLS_KEY_TOKODIALOGUE", cfg.tls_key_tokodialogue);
 
         if let Ok(v) = std::env::var("PROXY_RATE_LIMIT_RPS") {
             cfg.rate_limit_rps = v.parse().unwrap_or(cfg.rate_limit_rps);
@@ -382,6 +406,8 @@ impl Default for Config {
             tls_key_lajubus: None,
             tls_cert_ilyvowcraft: None,
             tls_key_ilyvowcraft: None,
+            tls_cert_tokodialogue: None,
+            tls_key_tokodialogue: None,
             cors_origins: default_cors_origins(),
             dev_origins: Vec::new(),
             image_cache_days: default_image_cache_days(),
@@ -399,6 +425,9 @@ impl Default for Config {
             ilyvowcraft_addr: default_ilyvowcraft_addr(),
             ilyvowcraft_image_host: String::new(),
             ilyvowcraft_ui_host: String::new(),
+            tokodialogue_domain: String::new(),
+            tokodialogue_addr: default_tokodialogue_addr(),
+            tokodialogue_image_host: String::new(),
             image_s3_subdomain: String::new(),
             ui_s3_subdomain: String::new(),
             ui_subdomain: default_ui_subdomain(),
@@ -461,6 +490,10 @@ fn default_ilyvowcraft_addr() -> String {
     // 3600 di host → 3000 di dalam container app `undangan` (ilyvowcraft).
     "127.0.0.1:3600".into()
 }
+fn default_tokodialogue_addr() -> String {
+    // 3800 di host → 3800 di dalam container app `bekasbagus` (TokoDialogue).
+    "127.0.0.1:3800".into()
+}
 fn default_ui_subdomain() -> String {
     "ui.ulalaapi.store".into()
 }
@@ -483,5 +516,9 @@ mod config_yaml_tests {
         assert_eq!(cfg.ilyvowcraft_ui_host, "ui.ilyvowcraft.online");
         assert_eq!(cfg.tls_cert_ilyvowcraft.as_deref(), Some("/etc/letsencrypt/live/ilyvowcraft.online/fullchain.pem"));
         assert_eq!(cfg.lajubus_domain, "lajubus.online");
+        assert_eq!(cfg.tokodialogue_domain, "tokodialogue.com");
+        assert_eq!(cfg.tokodialogue_addr, "127.0.0.1:3800");
+        assert_eq!(cfg.tokodialogue_image_host, "image.tokodialogue.com");
+        assert_eq!(cfg.tls_cert_tokodialogue.as_deref(), Some("/etc/letsencrypt/live/tokodialogue.com/fullchain.pem"));
     }
 }
