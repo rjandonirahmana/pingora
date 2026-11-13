@@ -471,6 +471,15 @@ fn is_static_path(path: &str) -> bool {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
+/// Permintaan gRPC (`application/grpc`, `application/grpc+proto`, …).
+/// Bukan `application/grpc-web` (lewat HTTP/1.1 biasa, tidak dipakai).
+pub fn is_grpc(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|c| {
+        let c = c.trim().to_ascii_lowercase();
+        c == "application/grpc" || c.starts_with("application/grpc+") || c.starts_with("application/grpc;")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,5 +1092,15 @@ mod tests {
         let kosong = cfg_ilyvowcraft();
         assert!(!is_known_host("tokodialogue.com", &kosong));
         assert!(!is_known_host("image.tokodialogue.com", &kosong));
+    }
+
+    #[test]
+    fn deteksi_grpc() {
+        assert!(is_grpc(Some("application/grpc")));
+        assert!(is_grpc(Some("application/grpc+proto")));
+        assert!(is_grpc(Some("Application/GRPC")));
+        assert!(!is_grpc(Some("application/grpc-web")));
+        assert!(!is_grpc(Some("application/json")));
+        assert!(!is_grpc(None));
     }
 }

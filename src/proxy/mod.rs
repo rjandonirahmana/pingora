@@ -301,7 +301,7 @@ impl ProxyHttp for KineticProxy {
     // ── Phase 2: Pilih upstream ───────────────────────────────────────────────
     async fn upstream_peer(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         let pool = self.state.pool_for(ctx.upstream);
@@ -316,6 +316,14 @@ impl ProxyHttp for KineticProxy {
         peer.options.connection_timeout = Some(Duration::from_secs(t.connect_secs));
         peer.options.read_timeout = Some(Duration::from_secs(t.read_secs));
         peer.options.write_timeout = Some(Duration::from_secs(t.write_secs));
+
+        // gRPC (aplikasi Android TokoDialogue) WAJIB HTTP/2 sampai ke app:
+        // trailer `grpc-status` tak ada di HTTP/1.1. App melayani h2c (HTTP/2
+        // tanpa TLS, prior knowledge) di port yang sama dengan web.
+        let content_type = session.req_header().headers.get("content-type").and_then(|v| v.to_str().ok());
+        if ctx.upstream == Upstream::Tokodialogue && router::is_grpc(content_type) {
+            peer.options.set_http_version(2, 2);
+        }
 
         Ok(Box::new(peer))
     }
@@ -867,6 +875,15 @@ pub fn build_proxy_service(
                 b.set_certificate_chain_file(&cert_td).expect("cert tokodialogue");
                 b.set_private_key_file(&key_td, SslFiletype::PEM)
                     .expect("key tokodialogue");
+                // h2 wajib untuk gRPC aplikasi Android (dan multipleks potongan
+                // WASM web). Konteks SNI MENGGANTI ALPN listener, jadi diset di
+                // sini juga. TokoDialogue tak memakai WebSocket (SSE saja).
+                {
+                    use openssl::ssl::{select_next_proto, AlpnError};
+                    b.set_alpn_select_callback(|_ssl, client| {
+                        select_next_proto(b"\x02h2\x08http/1.1", client).ok_or(AlpnError::NOACK)
+                    });
+                }
                 let mut exact: Vec<Box<str>> = vec![
                     cfg.tokodialogue_domain.as_str().into(),
                     format!("www.{}", cfg.tokodialogue_domain).into(),
